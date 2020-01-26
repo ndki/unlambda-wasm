@@ -71,7 +71,80 @@ const Unlambda = class {
         }
         return ast;
     }
-    run () {
+}
+
+const UnlambdaExecutable = class {
+    states;
+    inits;
+    constructor (ast) {
+        this.compile(ast);
+    }
+    compile (ast) {
+        this.states = new StateData ();
+        this.inits = [];
+        for (let node of ast.top.list) {
+            if (node instanceof UnlambdaASTApply) {
+                this.inits.push(this.compile_node(node));
+            }
+        }
+    }
+    compile_node (node) {
+        let ptr = this.states.new_call();
+        let init = void 8;
+        let node_stack = [[node, ptr, void 8, void 8]];
+        let left_ptr; let right_ptr;
+        while (node_stack.length > 0) {
+            [node, ptr, left_ptr, right_ptr] = node_stack.pop();
+            let left_valid = node.left.id != '!';
+            let right_valid = node.right.id != '!';
+            let left_apply = node.left.id == '`';
+            let right_apply = node.right.id == '`';
+            if (!init && left_valid && right_valid) {
+                init = ptr;
+            }
+            if (left_apply && left_ptr === undefined){
+                let next_i = this.states.new_call();
+                node_stack.push([node, ptr, next_i, void 8]);
+                node_stack.push([node.left, next_i, void 8, void 8]);
+                node = node.left;
+            } else if (right_apply && right_ptr === undefined){
+                let next_i = this.states.new_call();
+                node_stack.push([node, ptr, left_ptr, next_i]);
+                node_stack.push([node.right, next_i, void 8, void 8]);
+                node = node.right;
+            } else if (left_valid && right_valid) {
+                let convert = (node, ptr) => {
+                    if (node.id == '`') {
+                        if (node.left.id == '!'|| node.right === '!') {
+                            throw 'Application has too few arguments.'
+                        }
+                        return PointerFn.Call(ptr)
+                    } else {
+                        let ec = AST2Exec[node.id];
+                        if (node.id == '.' || node.id == '?') {
+                            return ec(node.value);
+                        } else if (node.id == 'e') {
+                            return ec(EXIT);
+                        } else {
+                            return ec;
+                        }
+                    }
+                }
+                let left_v = convert(node.left, left_ptr);
+                let right_v = convert(node.right, right_ptr);
+                this.states.set(ptr, left_v, right_v);
+            }
+        }
+        return init;
+    }
+    run (input, output) {
+        return this.inits.map((init)=>this.run_s(input, output, init));
+    }
+    run_s (input, output, init) {
+        return this.states.clone().run(init);
+    }
+    toString () {
+        return this.states+'';
     }
 }
 const UnlambdaAST = class {
@@ -228,435 +301,392 @@ const UnlambdaASTReprint = class extends UnlambdaASTNode {
 // when they are no longer referenced.
 // there are only a few types of function (ExecNode):
 // one of the symbol-functions,
-// the special ExecResolve function,
+// one of the character-functions,
+// the special Variable function,
 // or one of the 4 pointer-functions,
-// ExecValue, ExecCall, and ExecContinuation.
+// Literal, Call, Continuation, and Chain.
 // we say an ExecNode "resolves" to an immediately callable function,
 // and an ExecData "resolves" by producing an ExecData
 // that is an immediately callable function.
-// an ExecCall pointer-function cannot be resolved, that is,
-// we define an ExecData to be unresolved if contains an ExecCall,
-// or it is some `dP, where P is an ExecCall.
+// a Call pointer-function cannot be resolved, that is,
+// we define an ExecData to be unresolved if contains a Call,
+// unless it is some `dP, where P is an Call.
 // however, an unresolved Data will be used to generate resolved Data
 // using the other 4 functions.
-// the ExecVariable special function resolves to the value of 
-// the last function application. it is our single internal variable.
+// the Variable special function resolves to the value of 
+// the last function application. it is the access point for
+// our single internal variable other than "current character".
 // however, this variable never stores anything other than
 // the pointer to some valued ExecData.
-// an ExecValue pointer-function resolves to its target.
+// a Literal pointer-function resolves to its target.
 // that is, its value is the resolved ExecData that it pointer addresses.
-// although a function with ExecValues is resolved, the resulting value
+// although a function with Literals is resolved, the resulting value
 // may have to be generated as an additional state.
-// an ExecContinuation pointer-function encodes a continuation.
+// an Continuation pointer-function encodes a continuation.
 // a continuation is identity-valued but causes the state machine
 // to move to a particular state.
-// an ExecNext pointer-function encodes the callstack. it calls
+// an Chain pointer-function encodes the callstack. it calls
 // its argument on the ExecVariable, and then calls a continuation
 // on that result, as long as its argument isn't Exit.
 // Exit is actually just any continuation that addresses
 // the special state, `eX (exit with current value).
-// EDIT: "current character" is also an internal variable, going
-// by other implementations. its not obvious to me that this should
-// be true and preferred but whatever.
-const ExecNode = class {
-    toString () { return this.id }
-    get id () { return '!' }
+// this is all in theory. in actuality, some of the possible states
+// do not represent valid Unlambda programs, or a valid sequence
+// of calculations, so they are considered errors.
+// If any of these non-valid states are found by the state machine,
+// the resulting execution is considered to be undefined behavior.
+// Note: it seems really weird to me that "current character" is
+// a "global" variable. i feel like reseting the callstack should
+// also reset the "current character" value. but we follow the
+// other implementations.
+const StateType = {
+    Exit: 'E',
+    Call: 'C',
+    Resolved: 'O',
+    Chain: '&',
+    Identity: 'I',
+    Constant: 'K',
+    Substitute: 'S',
+    Substitute2: 'Z',
+    Promise: 'D',
 }
-const ExecPtr = class {
-    ptr;
-    constructor (ptr) { this.ptr = ptr }
-    toString () { return '['+this.ptr+']' }
-    [Symbol.toPrimitive] (hint) {
-        if (hint == 'string') {
-            return this.toString();
-        } else {
-            return this.ptr;
-        }
+const FunctionId = {
+    Unknown: '!',
+    Variable: 'X',
+    Identity: 'i',
+    Void: 'v',
+    Delay: 'd',
+    Constant: 'k',
+    Substitute: 's',
+    CallCC: 'c',
+    Read: '@',
+    Reprint: '|',
+    Literal: 'V',
+    Call: 'P',
+    Continuation: 'C',
+    Chain: 'N',
+    Print: '.',
+    Compare: '?',
+}
+
+const ExecNode = class {
+    constructor (id = FunctionId.Unknown) { this.id = id }
+    toString () { return this.id }
+}
+const SymbolFn = {
+    Variable: new ExecNode(FunctionId.Variable),
+    Identity: new ExecNode(FunctionId.Identity),
+    Void: new ExecNode(FunctionId.Void),
+    Delay: new ExecNode(FunctionId.Delay),
+    Constant: new ExecNode(FunctionId.Constant),
+    Substitute: new ExecNode(FunctionId.Substitute),
+    CallCC: new ExecNode(FunctionId.CallCC),
+    Read: new ExecNode(FunctionId.Read),
+    Reprint: new ExecNode(FunctionId.Reprint),
+}
+// our storage system StateData is typed,
+// so our pointers are typed as well.
+const StatePtr = class {
+    type; addr;
+    constructor (type, addr) {
+        this.type = type;
+        this.addr = addr;
+    }
+    toString () {
+        return '['+this.type+this.addr+']'
     }
 }
-const EXIT = new ExecPtr(0);
-const ExecPtrNode = class {
+const EXIT = new StatePtr(StateType.Exit,0);
+const ExecPtrNode = class extends ExecNode {
     ptr; is_exit;
-    constructor (ptr) {
+    constructor (id, ptr) {
+        super(id);
         this.ptr = ptr;
         this.is_exit = ptr.id == EXIT;
     }
     toString () { return this.id + this.ptr.toString() }
 }
-const ExecValue = class extends ExecPtrNode {
-    get id () { return 'V' }
+const PointerFnBase = function (id) {
+    return (ptr) => {
+        return new ExecPtrNode(id, ptr)
+    }
 }
-const ExecCall = class extends ExecPtrNode {
-    get id () { return 'P' }
-}
-const ExecContinuation = class extends ExecPtrNode {
-    get id () { return 'Q' }
-}
-const ExecNext = class extends ExecPtrNode {
-    get id () { return 'N' }
-}
-const ExecVariable = class extends ExecNode {
-    get id () { return 'X' }
-}
-const ExecVoid = class extends ExecNode {
-    get id () { return 'v' }
-}
-const ExecIdentity = class extends ExecNode {
-    get id () { return 'i' }
-}
-const ExecDelay = class extends ExecNode {
-    get id () { return 'd' }
-}
-const ExecConstant = class extends ExecNode {
-    get id () { return 'k' }
-}
-const ExecSubstitute = class extends ExecNode {
-    get id () { return 's' }
-}
-const ExecCallCC = class extends ExecNode {
-    get id () { return 'c' }
+const PointerFn = {
+    Literal: PointerFnBase(FunctionId.Literal),
+    Call: PointerFnBase(FunctionId.Call),
+    Continuation: PointerFnBase(FunctionId.Continuation),
+    Chain: PointerFnBase(FunctionId.Chain),
 }
 const ExecChar = class extends ExecNode {
-    get id () { return '.' }
-    constructor (v) { super(); this.value = v }
+    constructor (id, value) { super(id); this.value = value }
     toString () { return "'"+this.value+"'" }
 }
-const ExecRead = class extends ExecNode {
-    get id () { return '@' }
+const CharFn = {
+    Print: (value) => new ExecChar(FunctionId.Print,value),
+    Compare: (value) => new ExecChar(FunctionId.Compare,value),
 }
-const ExecCompare = class extends ExecNode {
-    get id () { return '?' }
-    constructor (v) { super(); this.value = v }
-    toString () { return "'"+this.value+"'" }
-}
-const ExecReprint = class extends ExecNode {
-    get id () { return '|' }
-}
-
-const ExecData = class {
-    left; right;
-    constructor (x,y) { this.left = x; this.right = y }
-    toString () { return this.id+'<'+this.left+' '+this.right+'>'; }
-}
-// Some data but it has a P or two
-const ExecCallData = class extends ExecData {
-    get id () { return 'C' }
-    toString () { return '<'+this.left+' '+this.right+'>'; }
-}
-// Some data that can be evaluated
-const ExecResolvedData = class extends ExecData {
-    get id () { return 'O' }
-    toString () { return this.left+'('+this.right+')'; }
-}
-// Some continuation data
-const ExecNextData = class extends ExecData {
-    get id () { return '&' }
-    toString () { return 'N('+this.left.ptr + ', ' +this.right.ptr+')'; }
-}
-// Some value
-const ExecIdentityData = class extends ExecData {
-    get id () { return 'I' }
-    constructor (v) { super(new ExecIdentity(), v) }
-    toString () { return 'i'+this.right; }
-}
-// Some `kx
-const ExecConstantData = class extends ExecData {
-    get id () { return 'K' }
-    constructor (v) { super(new ExecConstant (), v )}
-    toString () { return 'k'+this.right; }
-}
-// Some `sx
-const ExecSubstituteData = class extends ExecData {
-    get id () { return 'S' }
-    constructor (x) { super(new ExecSubstitute (),x ) }
-    toString () { return 's'+this.right; }
-}
-// Some ``sxy
-const ExecSubstituteData2 = class extends ExecData {
-    get id () { return 'Z' }
-    toString () { return 's('+this.left+','+this.right+')' }
-}
-// Some `dx
-const ExecPromiseData = class extends ExecData {
-    get id () { return 'D' }
-    constructor (v) { super(new ExecDelay (), v) }
-    toString () { return 'd'+this.right; }
-}
-// Some `vx
-const ExecVoidData = class extends ExecData {
-    get id () { return 'V' }
-    constructor () { super() }
-    toString () { return 'v' }
-}
-
-const ExecAddrGen = class {
-    i = EXIT.ptr+1;
-    next () { return new ExecPtr (this.i++) }
-}
-
-const ExecRunningStates = class {
-    map = new Map (); static_map;
-    constructor (states) { this.static_map = states.map }
-    set ({ptr: a}, b) {
-        //console.log('states <- '+b);
-        return this.map.set(a, b);
-    }
-    get ({ptr: a}) {
-        return this.map.get(a) || this.static_map.get(a);
-    }
-    size () {
-        return this.map.size;
-    }
-}
-const ExecStates = class {
-    map;
-    constructor (map = new Map ()) { this.map = map }
-    set ({ptr: a}, b) {
-        //console.log('states <- '+b);
-        return this.map.set(a, b)
-    }
-    get ({ptr: a}) { return this.map.get(a) }
-    clone () {
-        return new ExecStates(new Map (this.map));
-    }
-    size () {
-        return this.map.size;
-    }
-    toString () {
-        let s = [...this.map.values()].join(', ');
-        return s;
-    }
-    debugString (id) {
-        let s = [...this.map.keys()].map((k) =>{
-            return id.ptr == k ? '['+this.map.get(k)+']' : this.map.get(k)
-        }).join(', ');
-        return s;
-    }
-}
-
 const AST2Exec = {
-    '.': ExecChar,
-    'k': ExecConstant,
-    'i': ExecIdentity,
-    'v': ExecVoid,
-    'd': ExecDelay,
-    'c': ExecCallCC,
-    's': ExecSubstitute,
-    'e': ExecContinuation,
-    '@': ExecRead,
-    '?': ExecCompare,
-    '|': ExecReprint,
+    'k': SymbolFn.Constant,
+    'i': SymbolFn.Identity,
+    'v': SymbolFn.Void,
+    'd': SymbolFn.Delay,
+    'c': SymbolFn.CallCC,
+    's': SymbolFn.Substitute,
+    '@': SymbolFn.Read,
+    '|': SymbolFn.Reprint,
+    'e': PointerFn.Continuation,
+    '.': CharFn.Print,
+    '?': CharFn.Compare,
 };
 
-const UnlambdaExecutable = class {
-    states;
-    inits;
-    addr_gen;
-    constructor (ast) {
-        this.compile(ast);
+const State = class {
+    left; right;
+    toString () {
+        return this.right ? this.left ? '<'+this.left+' '+this.right+'>'
+            : '<'+this.right+'>' : '<>'
     }
-    compile (ast) {
-        this.states = new ExecStates ();
-        this.addr_gen = new ExecAddrGen ();
-        this.inits = [];
-        for (let node of ast.top.list) {
-            if (node instanceof UnlambdaASTApply) {
-                this.inits.push(this.compile_node(node));
-            }
-        }
+}
+
+const StateData = class {
+    call_states = [];
+    resolved_states = [];
+    // note: in chain_states we only store pointers
+    // since we always know the structure
+    chain_states = [];
+    identity_states = [];
+    simple_states = [];
+    substitute_states = [];
+    size () {
+        return this.call_states.length + this.resolved_states.length
+            + this.chain_states.length + this.identity_states.length
+            + this.simple_states.length + this.substitute_states.length
     }
-    compile_node (node) {
-        let ptr = this.addr_gen.next();
-        let init = void 8;
-        let node_stack = [[node, ptr, void 8, void 8]];
-        let left_ptr; let right_ptr;
-        while (node_stack.length > 0) {
-            [node, ptr, left_ptr, right_ptr] = node_stack.pop();
-            let left_valid = node.left.id != '!';
-            let right_valid = node.right.id != '!';
-            let left_apply = node.left.id == '`';
-            let right_apply = node.right.id == '`';
-            if (!init && left_valid && right_valid) {
-                init = ptr;
-            }
-            if (left_apply && left_ptr === undefined){
-                let next_i = this.addr_gen.next();
-                node_stack.push([node, ptr, next_i, void 8]);
-                node_stack.push([node.left, next_i, void 8, void 8]);
-                node = node.left;
-            } else if (right_apply && right_ptr === undefined){
-                let next_i = this.addr_gen.next();
-                node_stack.push([node, ptr, left_ptr, next_i]);
-                node_stack.push([node.right, next_i, void 8, void 8]);
-                node = node.right;
-            } else if (left_valid && right_valid) {
-                let convert = (node, ptr) => {
-                    if (node.id == '`') {
-                        if (node.left.id == '!'|| node.right === '!') {
-                            throw 'Application has too few arguments.'
-                        }
-                        return new ExecCall(ptr)
-                    } else {
-                        let ec = AST2Exec[node.id];
-                        if (node.id == '.' || node.id == '?') {
-                            return new ec(node.value);
-                        } else if (node.id == 'e') {
-                            return new ec(EXIT);
-                        } else {
-                            return new ec();
-                        }
-                    }
-                }
-                let left_v = convert(node.left, left_ptr);
-                let right_v = convert(node.right, right_ptr);
-                this.states.set(ptr, new ExecCallData(left_v, right_v));
-            }
-        }
-        return init;
+    clone () {
+        let sd = new StateData();
+        sd.call_states = this.call_states;
+        sd.resolved_states = this.resolved_states;
+        sd.chain_states = this.chain_states;
+        sd.identity_states = this.identity_states;
+        sd.simple_states = this.simple_states;
+        sd.substitute_states = this.substitute_states;
+        return sd;
     }
-    run (input, output) {
-        return this.inits.map((init)=>this.run_s(input, output, init));
+    set (a, x, y) { /// hopefully going away soon
+        this.call_states[a.addr] = x;
+        this.call_states[a.addr+1] = y;
     }
-    run_s (input, output, init) {
-        let ptr = init;
-        let variable = new ExecContinuation (EXIT);
+    new_call (a, b) { /// also temporary
+        return new StatePtr(StateType.Call, this.call_states.push(void 8)-1);
+    }
+    add_call (x, y) {
+        let i = this.call_states.push(x, y)-2;
+        return new StatePtr(StateType.Call, i);
+    }
+    get_call ({addr}) {
+        return {left: this.call_states[addr], right: this.call_states[addr+1]}
+    }
+    add_chain (x, y) {
+        let i = this.chain_states.push(x, y)-2;
+        return new StatePtr(StateType.Chain, i);
+    }
+    get_chain ({addr}) {
+        return {left: this.chain_states[addr], right: this.chain_states[addr+1]}
+    }
+    add_resolved (x, y) {
+        let i = this.resolved_states.push(x, y)-2;
+        return new StatePtr(StateType.Resolved, i);
+    }
+    get_resolved ({addr}) {
+        return {left: this.resolved_states[addr], right: this.resolved_states[addr+1]}
+    }
+    add_simple (t, x) {
+        let i = this.simple_states.push(x)-1;
+        return new StatePtr(t, i)
+    }
+    add_constant (x) {
+        return this.add_simple(StateType.Constant, x);
+    }
+    get_constant ({addr}) {
+        return this.simple_states[addr]
+    }
+    add_identity (x) {
+        return this.add_simple(StateType.Identity, x);
+    }
+    get_identity ({addr}) {
+        return this.simple_states[addr]
+    }
+    add_promise (x) {
+        return this.add_simple(StateType.Promise, x);
+    }
+    get_promise ({addr}) {
+        return this.simple_states[addr]
+    }
+    add_substitute (x) {
+        return this.add_simple(StateType.Substitute, x);
+    }
+    get_substitute ({addr}) {
+        return this.simple_states[addr]
+    }
+    add_substitute2 (x, y) {
+        let i = this.substitute_states.push(x, y)-2;
+        return new StatePtr(StateType.Substitute2, i);
+    }
+    get_substitute2 ({addr}) {
+        return {left: this.substitute_states[addr+1], right: this.substitute_states[addr+1]}
+    }
+    toString () {
+        return [...this.states.values()].join(' ');
+    }
+    run (ptr) {
+        let variable = PointerFn.Continuation(EXIT);
         let trail = EXIT;
-        let current_char = new ExecVoid ();
-        let states = new ExecRunningStates(this.states);
+        let current_char = SymbolFn.Void;
+        let states = this;
         let total = 0;
-        while (ptr != EXIT && total++ < 600000) {
-            //console.log(ptr+' '+variable+' >>', states.debugString(ptr));
-            let data = states.get(ptr);
-            let {left, right} = data;
-            //console.log(ptr+' '+variable+' >> '+data);
-            const add_state = (s) => {
-                let new_addr = this.addr_gen.next();
-                states.set(new_addr, s);
-                return new_addr;
-            }
-            if (left.id == 'X') { left = variable }
-            else if (right.id == 'X') { right = variable }
-            if (left.id == 'P') {
-                let new_d = new ExecResolvedData(new ExecVariable(), right);
-                let replacement = add_state(new_d);
-                let continuation = new ExecContinuation(replacement);
-                let next = new ExecNext(trail);
-                trail = add_state(new ExecNextData(next, continuation));
-                ptr = left.ptr;
-            } else if (left.id == 'd') {
-                variable = new ExecValue(add_state(new ExecPromiseData(right)));
-                ptr = trail;
-            } else if (right.id == 'P') {
-                let new_d = new ExecResolvedData(left, new ExecVariable());
-                let replacement = add_state(new_d);
-                let continuation = new ExecContinuation(replacement);
-                let next = new ExecNext(trail);
-                trail = add_state(new ExecNextData(next, continuation));
-                ptr = right.ptr;
-            } else if (left.id == 'V') {
-                let v = states.get(left.ptr);
-                switch (v.id) {
-                    case 'I':
-                    ptr = add_state(new ExecResolvedData(v.right, right));
-                    break;
-                    case 'D':
-                    ptr = add_state(new ExecCallData(v.right, right));
-                    break;
-                    case 'K':
-                    ptr = add_state(new ExecResolvedData(v.right, right));
-                    break;
-                    case 'S':
-                    let z = add_state(new ExecSubstituteData2(v.right, right));
-                    variable = new ExecValue(z);
+        while (ptr.type != StateType.Exit && total++ < 6000) {
+            //console.log(''+ptr);
+            switch (ptr.type) {
+                case StateType.Call:
+                let call = states.get_call(ptr);
+                if (call.left.id == FunctionId.Call) {
+                    // adding a chain ensures we come back to <replacement>
+                    // after we resolve left.ptr
+                    let replacement = states.add_resolved(SymbolFn.Variable, call.right);
+                    trail = states.add_chain(replacement, trail);
+                    ptr = call.left.ptr;
+                } else if (call.left.id == FunctionId.Delay) {
+                    variable = PointerFn.Literal(states.add_promise(call.right));
                     ptr = trail;
-                    break;
-                    case 'Z':
-                        let left_d = new ExecResolvedData(v.left, right);
-                        let right_d = new ExecResolvedData(v.right, right);
-                        let left_ptr = new ExecCall(add_state(left_d));
-                        let right_ptr = new ExecCall(add_state(right_d));
-                        let ap_d = new ExecCallData(left_ptr, right_ptr);
-                        let replacement = add_state(ap_d);
-                        ptr = replacement;
-                    break;
-                    case 'O':
-                    throw 'Something fucked up idk'
-                    case 'C':
-                    throw 'Something fucked up idk'
-                    default:
-                    throw 'Something fucked up idk'
+                } else if (call.right.id == FunctionId.Call) {
+                    let replacement = states.add_resolved(call.left, SymbolFn.Variable);
+                    trail = states.add_chain(replacement, trail);
+                    ptr = call.right.ptr;
+                } else {
+                    ptr = states.add_resolved(call.left, call.right);
                 }
-            } else if (data.id == '&') {
-                trail = left.ptr;
-                ptr = right.ptr;
-            } else if (data.id == 'I') {
-                variable = right;
-                ptr = trail;
-            } else if (data.id == 'C' || data.id == 'O') {
-                switch (left.id) {
-                    case '.':
-                    output.push(left.value);
-                    variable = new ExecValue(add_state(new ExecIdentityData(right)));
+                break;
+                case StateType.Resolved:
+                let rsv = states.get_resolved(ptr);
+                if (rsv.left.id == 'X') { rsv.left = variable }
+                else if (rsv.right.id == 'X') { rsv.right = variable }
+                switch (rsv.left.id) {
+                    case FunctionId.Literal:
+                    switch (rsv.left.ptr.type) {
+                        case StateType.Identity:
+                        let value = states.get_identity(rsv.left.ptr);
+                        ptr = states.add_resolved(value, rsv.right);
+                        break;
+                        case StateType.Promise:
+                        let promise = states.get_promise(rsv.left.ptr);
+                        ptr = states.add_call(promise, rsv.right);
+                        break;
+                        case StateType.Constant:
+                        let constant = states.get_constant(rsv.left.ptr);
+                        variable = constant;
+                        ptr = trail;
+                        break;
+                        case StateType.Substitute:
+                        let subst = states.get_substitute(rsv.left.ptr);
+                        let z = states.add_substitute2(subst.right, rsv.right);
+                        variable = PointerFn.Literal(z);
+                        ptr = trail;
+                        break;
+                        case StateType.Substitute2:
+                        let subst2 = states.get_substitute2(rsv.left.ptr);
+                        let left_ptr = states.add_resolved(subst2.left, rsv.right);
+                        let right_ptr = states.add_resolved(subst2.right, rsv.right);
+                        let left_fn = PointerFn.Call(left_ptr);
+                        let right_fn = PointerFn.Call(right_ptr);
+                        let replacement = states.add_call(left_fn, right_fn);
+                        ptr = replacement;
+                        break;
+                        case StateType.Resolved:
+                        throw 'Cannot double resolve.';
+                        break;
+                        case StateType.Call:
+                        throw 'A Call cannot be resolved.';
+                        case StateType.Chain:
+                        throw 'A Chain should not be referenced.'
+                        default:
+                        throw "Unknown state type in "+left.ptr;
+                    }
+                    break;
+                    case FunctionId.Print:
+                    output.push(rsv.left.value);
+                    variable = rsv.right;
                     ptr = trail;
                     break;
-                    case 'i':
-                    variable = new ExecValue(add_state(new ExecIdentityData(right)));
+                    case FunctionId.Identity:
+                    variable = rsv.right;
                     ptr = trail;
                     break;
-                    case 'k':
-                    variable = new ExecValue(add_state(new ExecConstantData(right)));
+                    case FunctionId.Constant:
+                    variable = PointerFn.Literal(states.add_constant(rsv.right));
                     ptr = trail;
                     break;
-                    case 's':
-                    variable = new ExecValue(add_state(new ExecSubstituteData(right)));
+                    case FunctionId.Substitute:
+                    variable = PointerFn.Literal(states.add_substitute(rsv.right));
                     ptr = trail;
                     break;
-                    case '@':
+                    case FunctionId.Read:
                     let m = input.next();
                     let read_result;
                     if (!m.done) {
-                        read_result = new ExecVoid ();
+                        read_result = SymbolFn.Void;
                     } else {
-                        current_char = new ExecChar(m.value);
-                        read_result = new ExecIdentity ()
+                        current_char = CharFn.Print(m.value);
+                        read_result = SymbolFn.Identity;
                     }
-                    ptr = add_state(new ExecResolvedData(right, read_result));
+                    ptr = states.add_resolved(rsv.right, read_result);
                     break;
-                    case '?':
-                    let compare_result
-                    if (!current_char || current_char.value != left.value) {
-                        compare_result = new ExecVoid ();
+                    case FunctionId.Compare:
+                    let compare_result;
+                    if (!current_char || current_char.value != rsv.left.value) {
+                        compare_result = SymbolFn.Void;
                     } else {
-                        compare_result = new ExecIdentity ()
+                        compare_result = SymbolFn.Identity;
                     }
-                    ptr = add_state(new ExecResolvedData(right, compare_result));
+                    ptr = states.add_resolved(rsv.right, compare_result);
                     break;
-                    case '|':
-                    ptr = add_state(new ExecResolvedData(right, current_char));
+                    case FunctionId.Reprint:
+                    ptr = states.add_resolved(rsv.right, current_char);
                     break;
-                    case 'Q':
-                    variable = right;
-                    ptr = left.ptr;
+                    case FunctionId.Continuation:
+                    variable = rsv.right;
+                    ptr = rsv.left.ptr;
                     break;
-                    case 'c':
-                    let ic = new ExecResolvedData(right, new ExecContinuation(trail))
-                    ptr = add_state(ic);
+                    case FunctionId.CallCC:
+                    let continuation = PointerFn.Continuation(trail);
+                    ptr = states.add_resolved(rsv.right, continuation);
                     break;
-                    case 'v':
-                    variable = new ExecVoid();
+                    case FunctionId.Void:
+                    variable = SymbolFn.Void;
                     ptr = trail;
                     break;
                     default:
-                    throw 'Internal runtime error: '+left+' is not recognized.'
+                    throw 'Internal runtime error: '+rsv.left+' is not recognized.'
                 }
-            } else {
-                throw 'not sure what to do with '+data
+                break;
+                case StateType.Chain:
+                let chain = states.get_chain(ptr);
+                trail = chain.left;
+                ptr = chain.right;
+                break;
+                case StateType.Identity:
+                variable = states.get_identity(ptr);
+                ptr = trail;
+                break;
+                case StateType.Substitute2:
+                case StateType.Constant:
+                case StateType.Substitute:
+                case StateType.Promise:
+                throw "The state "+ptr.type+" cannot be evaluated.";
+                break;
+                default:
+                throw "Unknown state type in "+ptr;
             }
         }
         return [total, states.size()];
-    }
-    toString () {
-        return this.states+'';
     }
 }
 
