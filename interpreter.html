@@ -374,7 +374,7 @@ const FunctionId = {
     Reprint: '|',
     Literal: 'V',
     Call: 'P',
-    Continuation: 'C',
+    Continuation: 'Q',
     Chain: 'N',
     Print: '.',
     Compare: '?',
@@ -588,7 +588,63 @@ const StateData = class {
                 //console.log(''+ptr+' ['+rsv.left+' '+rsv.right+'] <- '+variable);
                 if (rsv.left.id == FunctionId.Variable) { rsv.left = variable }
                 else if (rsv.right.id == FunctionId.Variable) { rsv.right = variable }
+                // the function determines what we do
                 switch (rsv.left.id) {
+                    // tentatively putting void first since it
+                    // should tend to propagate
+                    case FunctionId.Void:
+                    variable = SymbolFn.Void;
+                    ptr = trail;
+                    break;
+                    // in a resolved state, print delay & identity
+                    // have a similar effect
+                    case FunctionId.Print:
+                    output.push(rsv.left.value);
+                    case FunctionId.Delay:
+                    case FunctionId.Identity:
+                    variable = rsv.right;
+                    ptr = trail;
+                    break;
+                    case FunctionId.Continuation:
+                    variable = rsv.right;
+                    ptr = rsv.left.ptr;
+                    break;
+                    case FunctionId.CallCC:
+                    let continuation = PointerFn.Continuation(trail);
+                    ptr = states.add_resolved(rsv.right, continuation);
+                    break;
+                    case FunctionId.Constant:
+                    variable = PointerFn.Literal(states.add_constant(rsv.right));
+                    ptr = trail;
+                    break;
+                    case FunctionId.Substitute:
+                    variable = PointerFn.Literal(states.add_substitute(rsv.right));
+                    ptr = trail;
+                    break;
+                    case FunctionId.Read:
+                    let m = input.next();
+                    let read_result;
+                    if (!m.done) {
+                        read_result = SymbolFn.Void;
+                    } else {
+                        current_char = CharFn.Print(m.value);
+                        read_result = SymbolFn.Identity;
+                    }
+                    ptr = states.add_resolved(rsv.right, read_result);
+                    break;
+                    case FunctionId.Compare:
+                    let compare_result;
+                    if (!current_char || current_char.value != rsv.left.value) {
+                        compare_result = SymbolFn.Void;
+                    } else {
+                        compare_result = SymbolFn.Identity;
+                    }
+                    ptr = states.add_resolved(rsv.right, compare_result);
+                    break;
+                    case FunctionId.Reprint:
+                    ptr = states.add_resolved(rsv.right, current_char);
+                    break;
+                    // our function is the result of some resolved function
                     case FunctionId.Literal:
                     switch (rsv.left.ptr.type) {
                         case StateType.Identity:
@@ -629,58 +685,6 @@ const StateData = class {
                         default:
                         throw "Unknown state type in "+left.ptr;
                     }
-                    break;
-                    case FunctionId.Print:
-                    output.push(rsv.left.value);
-                    variable = rsv.right;
-                    ptr = trail;
-                    break;
-                    case FunctionId.Identity:
-                    variable = rsv.right;
-                    ptr = trail;
-                    break;
-                    case FunctionId.Constant:
-                    variable = PointerFn.Literal(states.add_constant(rsv.right));
-                    ptr = trail;
-                    break;
-                    case FunctionId.Substitute:
-                    variable = PointerFn.Literal(states.add_substitute(rsv.right));
-                    ptr = trail;
-                    break;
-                    case FunctionId.Read:
-                    let m = input.next();
-                    let read_result;
-                    if (!m.done) {
-                        read_result = SymbolFn.Void;
-                    } else {
-                        current_char = CharFn.Print(m.value);
-                        read_result = SymbolFn.Identity;
-                    }
-                    ptr = states.add_resolved(rsv.right, read_result);
-                    break;
-                    case FunctionId.Compare:
-                    let compare_result;
-                    if (!current_char || current_char.value != rsv.left.value) {
-                        compare_result = SymbolFn.Void;
-                    } else {
-                        compare_result = SymbolFn.Identity;
-                    }
-                    ptr = states.add_resolved(rsv.right, compare_result);
-                    break;
-                    case FunctionId.Reprint:
-                    ptr = states.add_resolved(rsv.right, current_char);
-                    break;
-                    case FunctionId.Continuation:
-                    variable = rsv.right;
-                    ptr = rsv.left.ptr;
-                    break;
-                    case FunctionId.CallCC:
-                    let continuation = PointerFn.Continuation(trail);
-                    ptr = states.add_resolved(rsv.right, continuation);
-                    break;
-                    case FunctionId.Void:
-                    variable = SymbolFn.Void;
-                    ptr = trail;
                     break;
                     default:
                     throw 'Internal runtime error: '+rsv.left+' is not recognized.'
