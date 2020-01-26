@@ -16,7 +16,7 @@
 </style>
 <script>
 'use strict;'
-let Unlambda = class {
+const Unlambda = class {
     parse (source) {
         let ast = new UnlambdaAST ();
         let node_stack = [ast.top];
@@ -36,6 +36,8 @@ let Unlambda = class {
                     'v': UnlambdaASTVoid,
                     'd': UnlambdaASTDelay,
                     'c': UnlambdaASTCallCC,
+                    '@': UnlambdaASTRead,
+                    '|': UnlambdaASTReprint,
                 };
                 let type = char_map[c];
                 if (type === undefined) {
@@ -45,6 +47,9 @@ let Unlambda = class {
                     } else if (c == 'r') {
                         node = new UnlambdaASTChar ();
                         node.value = "\n";
+                    } else if (c == '?') {
+                        node = new UnlambdaASTCompare ();
+                        state = CHAR;
                     } else if (c == '#') {
                         state = CMMT;
                     } else {
@@ -69,7 +74,7 @@ let Unlambda = class {
     run () {
     }
 }
-let UnlambdaAST = class {
+const UnlambdaAST = class {
     top;
     constructor () {
         this.top = new UnlambdaASTTop ();
@@ -81,7 +86,7 @@ let UnlambdaAST = class {
         return new UnlambdaExecutable (this);
     }
 }
-let UnlambdaASTNode = class {
+const UnlambdaASTNode = class {
     get name () { return 'empty' }
     get data () { return false }
     get id () { return '!' }
@@ -92,7 +97,7 @@ let UnlambdaASTNode = class {
         return '['+this.name+']';
     }
 }
-let UnlambdaASTTop = class {
+const UnlambdaASTTop = class {
     get name () { return 'top' }
     get data () { return true }
     list = [];
@@ -108,7 +113,7 @@ let UnlambdaASTTop = class {
         return 'AST(' + this.list.join(', ') + ')';
     }
 }
-let UnlambdaASTApply = class extends UnlambdaASTNode {
+const UnlambdaASTApply = class extends UnlambdaASTNode {
     get name () { return 'apply' }
     get data () { return true }
     get id () { return '`' }
@@ -134,38 +139,64 @@ let UnlambdaASTApply = class extends UnlambdaASTNode {
         }
     }
     toString () {
-        return '`(' + this.left + ' ' + this.right + ')';
+        //return '`(' + this.left + ' ' + this.right + ')';
+        let str = '`(';
+        let rights = ['', this.right];
+        let v = this.left;
+        while (rights.length > 0) {
+            if (v.id == '`') {
+                str += '`('
+                if (v.left.id == '`') {
+                    rights.push(v.right);
+                    v = v.left;
+                } else {
+                    str += v.left + ', ';
+                    if (v.right.id == '`') {
+                        rights.push('');
+                        v = v.right;
+                    } else {
+                        str += v.right + ')';
+                        v = rights.pop();
+                    }
+                }
+            } else {
+                str += ', '+v+')';
+                v = rights.pop();
+            }
+        }
+        str += ')';
+        return str;
     }
 }
-let UnlambdaASTConstant = class extends UnlambdaASTNode {
+const UnlambdaASTConstant = class extends UnlambdaASTNode {
     get name () { return 'const' }
     get id () { return 'k' }
 }
-let UnlambdaASTSubstitute = class extends UnlambdaASTNode {
+const UnlambdaASTSubstitute = class extends UnlambdaASTNode {
     get name () { return 'sub' }
     get id () { return 's' }
 }
-let UnlambdaASTIdentity = class extends UnlambdaASTNode {
+const UnlambdaASTIdentity = class extends UnlambdaASTNode {
     get name () { return 'id' }
     get id () { return 'i' }
 }
-let UnlambdaASTVoid = class extends UnlambdaASTNode {
+const UnlambdaASTVoid = class extends UnlambdaASTNode {
     get name () { return 'void' }
     get id () { return 'v' }
 }
-let UnlambdaASTCallCC = class extends UnlambdaASTNode {
+const UnlambdaASTCallCC = class extends UnlambdaASTNode {
     get name () { return 'call/cc' }
     get id () { return 'c' }
 }
-let UnlambdaASTDelay = class extends UnlambdaASTNode {
+const UnlambdaASTDelay = class extends UnlambdaASTNode {
     get name () { return 'delay' }
     get id () { return 'd' }
 }
-let UnlambdaASTExit = class extends UnlambdaASTNode {
+const UnlambdaASTExit = class extends UnlambdaASTNode {
     get name () { return 'exit' }
     get id () { return 'e' }
 }
-let UnlambdaASTChar = class extends UnlambdaASTNode {
+const UnlambdaASTChar = class extends UnlambdaASTNode {
     get name () { return 'char' }
     get id () { return '.' }
     value = '';
@@ -173,136 +204,234 @@ let UnlambdaASTChar = class extends UnlambdaASTNode {
         return '[char ' + this.value + ']';
     }
 }
+const UnlambdaASTRead = class extends UnlambdaASTNode {
+    get name () { return 'read' }
+    get id () { return '@' }
+}
+const UnlambdaASTCompare = class extends UnlambdaASTNode {
+    get name () { return 'cmp' }
+    get id () { return '?' }
+    value = '';
+    toString () {
+        return '[cmp ' + this.value + ']';
+    }
+}
+const UnlambdaASTReprint = class extends UnlambdaASTNode {
+    get name () { return 'reprint' }
+    get id () { return '|' }
+}
 
-let ExecData = class {
-    toString () { return 'DATA' }
+// okay here's where its less obvious whats going on...
+// we compile to a state machine and each state is
+// a function application called ExecData.
+// we very frequently add states.
+// when they are no longer referenced.
+// there are only a few types of function (ExecNode):
+// one of the symbol-functions,
+// the special ExecResolve function,
+// or one of the 4 pointer-functions,
+// ExecValue, ExecCall, and ExecContinuation.
+// we say an ExecNode "resolves" to an immediately callable function,
+// and an ExecData "resolves" by producing an ExecData
+// that is an immediately callable function.
+// an ExecCall pointer-function cannot be resolved, that is,
+// we define an ExecData to be unresolved if contains an ExecCall,
+// or it is some `dP, where P is an ExecCall.
+// however, an unresolved Data will be used to generate resolved Data
+// using the other 4 functions.
+// the ExecVariable special function resolves to the value of 
+// the last function application. it is our single internal variable.
+// however, this variable never stores anything other than
+// the pointer to some valued ExecData.
+// an ExecValue pointer-function resolves to its target.
+// that is, its value is the resolved ExecData that it pointer addresses.
+// although a function with ExecValues is resolved, the resulting value
+// may have to be generated as an additional state.
+// an ExecContinuation pointer-function encodes a continuation.
+// a continuation is identity-valued but causes the state machine
+// to move to a particular state.
+// an ExecNext pointer-function encodes the callstack. it calls
+// its argument on the ExecVariable, and then calls a continuation
+// on that result, as long as its argument isn't Exit.
+// Exit is actually just any continuation that addresses
+// the special state, `eX (exit with current value).
+// EDIT: "current character" is also an internal variable, going
+// by other implementations. its not obvious to me that this should
+// be true and preferred but whatever.
+const ExecNode = class {
+    toString () { return this.id }
+    get id () { return '!' }
 }
-let ExecId = class {
-    id;
-    constructor (id) { this.id = id }
-    toString () { return '['+this.id+']' }
+const ExecPtr = class {
+    ptr;
+    constructor (ptr) { this.ptr = ptr }
+    toString () { return '['+this.ptr+']' }
+    [Symbol.toPrimitive] (hint) {
+        if (hint == 'string') {
+            return this.toString();
+        } else {
+            return this.ptr;
+        }
+    }
 }
-let ExecCall = class {
-    id = ExecId;
-    constructor (id) { this.id = id }
-    toString () { return 'P' + this.id }
+const EXIT = new ExecPtr(0);
+const ExecPtrNode = class {
+    ptr; is_exit;
+    constructor (ptr) {
+        this.ptr = ptr;
+        this.is_exit = ptr.id == EXIT;
+    }
+    toString () { return this.id + this.ptr.toString() }
 }
-let ExecValue = class {
-    id = ExecId;
-    constructor (id) { this.id = id }
-    toString () { return 'V' + this.id }
+const ExecValue = class extends ExecPtrNode {
+    get id () { return 'V' }
 }
-let ExecVoid = class {
+const ExecCall = class extends ExecPtrNode {
+    get id () { return 'P' }
+}
+const ExecContinuation = class extends ExecPtrNode {
+    get id () { return 'Q' }
+}
+const ExecNext = class extends ExecPtrNode {
+    get id () { return 'N' }
+}
+const ExecVariable = class extends ExecNode {
+    get id () { return 'X' }
+}
+const ExecVoid = class extends ExecNode {
+    get id () { return 'v' }
+}
+const ExecIdentity = class extends ExecNode {
+    get id () { return 'i' }
+}
+const ExecDelay = class extends ExecNode {
+    get id () { return 'd' }
+}
+const ExecConstant = class extends ExecNode {
+    get id () { return 'k' }
+}
+const ExecSubstitute = class extends ExecNode {
+    get id () { return 's' }
+}
+const ExecCallCC = class extends ExecNode {
+    get id () { return 'c' }
+}
+const ExecChar = class extends ExecNode {
+    get id () { return '.' }
+    constructor (v) { super(); this.value = v }
+    toString () { return "'"+this.value+"'" }
+}
+const ExecRead = class extends ExecNode {
+    get id () { return '@' }
+}
+const ExecCompare = class extends ExecNode {
+    get id () { return '?' }
+    constructor (v) { super(); this.value = v }
+    toString () { return "'"+this.value+"'" }
+}
+const ExecReprint = class extends ExecNode {
+    get id () { return '|' }
+}
+
+const ExecData = class {
+    left; right;
+    constructor (x,y) { this.left = x; this.right = y }
+    toString () { return this.id+'<'+this.left+' '+this.right+'>'; }
+}
+// Some data but it has a P or two
+const ExecCallData = class extends ExecData {
+    get id () { return 'C' }
+    toString () { return '<'+this.left+' '+this.right+'>'; }
+}
+// Some data that can be evaluated
+const ExecResolvedData = class extends ExecData {
+    get id () { return 'O' }
+    toString () { return this.left+'('+this.right+')'; }
+}
+// Some continuation data
+const ExecNextData = class extends ExecData {
+    get id () { return '&' }
+    toString () { return 'N('+this.left.ptr + ', ' +this.right.ptr+')'; }
+}
+// Some value
+const ExecIdentityData = class extends ExecData {
+    get id () { return 'I' }
+    constructor (v) { super(new ExecIdentity(), v) }
+    toString () { return 'i'+this.right; }
+}
+// Some `kx
+const ExecConstantData = class extends ExecData {
+    get id () { return 'K' }
+    constructor (v) { super(new ExecConstant (), v )}
+    toString () { return 'k'+this.right; }
+}
+// Some `sx
+const ExecSubstituteData = class extends ExecData {
+    get id () { return 'S' }
+    constructor (x) { super(new ExecSubstitute (),x ) }
+    toString () { return 's'+this.right; }
+}
+// Some ``sxy
+const ExecSubstituteData2 = class extends ExecData {
+    get id () { return 'Z' }
+    toString () { return 's('+this.left+','+this.right+')' }
+}
+// Some `dx
+const ExecPromiseData = class extends ExecData {
+    get id () { return 'D' }
+    constructor (v) { super(new ExecDelay (), v) }
+    toString () { return 'd'+this.right; }
+}
+// Some `vx
+const ExecVoidData = class extends ExecData {
+    get id () { return 'V' }
+    constructor () { super() }
     toString () { return 'v' }
 }
-let ExecIdentity = class {
-    toString () { return 'i' }
+
+const ExecAddrGen = class {
+    i = EXIT.ptr+1;
+    next () { return new ExecPtr (this.i++) }
 }
-let ExecDelay = class {
-    toString () { return 'd' }
-}
-let ExecPromise = class {
-    constructor (v) { this.value = v }
-    toString () { return 'd'+this.value }
-}
-let ExecConstant = class {
-    toString () { return 'k' }
-}
-let ExecConstant1 = class {
-    constructor (v) { this.value = v }
-    toString () { return 'k'+this.value }
-}
-let ExecSubstitute = class {
-    toString () { return 's' }
-}
-let ExecSubstitute1 = class {
-    constructor (x) { this.x = x }
-    toString () { return 's'+this.x }
-}
-let ExecSubstitute2 = class {
-    constructor (x,y) { this.x = x; this.y = y }
-    toString () { return 's'+this.x+this.y }
-}
-let ExecCallCC = class {
-    toString () { return 'c' }
-}
-let ExecCC = class {
-    constructor (id, cont) { this.id = id; this.continuation = cont }
-    toString () { return '*' }
-}
-let ExecExit = class {
-    toString () { return 'e' }
-}
-let ExecChar = class {
-    constructor (v) { this.value = v }
-    toString () { return 'C'+this.value }
-}
-let ExecCallStack = class {
-    locations;
-    status;
-    constructor (locations=[], status=[]) {
-        this.locations = locations;
-        this.status = status;
+
+const ExecRunningStates = class {
+    map = new Map (); static_map;
+    constructor (states) { this.static_map = states.map }
+    set ({ptr: a}, b) {
+        //console.log('states <- '+b);
+        return this.map.set(a, b);
     }
-    get length () { return this.locations.length }
+    get ({ptr: a}) {
+        return this.map.get(a) || this.static_map.get(a);
+    }
+    size () {
+        return this.map.size;
+    }
+}
+const ExecStates = class {
+    map;
+    constructor (map = new Map ()) { this.map = map }
+    set ({ptr: a}, b) {
+        //console.log('states <- '+b);
+        return this.map.set(a, b)
+    }
+    get ({ptr: a}) { return this.map.get(a) }
     clone () {
-        // we will need to increase reference counts here
-        return new this.constructor (
-            this.locations.slice(0),
-            this.status.slice(0)
-        );
+        return new ExecStates(new Map (this.map));
     }
-    pop () {
-        return [this.locations.pop(), this.status.pop()]
+    size () {
+        return this.map.size;
     }
-    append (cs) {
-        this.locations.push(...cs.locations);
-        this.status.push(...cs.status);
-    }
-    unshift (new_l, new_s) {
-        this.locations.unshift(new_l);
-        this.status.unshift(new_s);
-    }
-    push (new_l, new_s) {
-        this.locations.push(new_l);
-        this.status.push(new_s);
-    }
-    toString () {
-        const message = ['Fresh', 'Partial', 'Complete'];
-        let s = "Continuation:\n";
-        for (let i = this.length-1; i >= 0; i--) {
-            s += message[this.status[i]]
-                +' call at P'+this.locations[i]+"\n";
-        }
-        return s;
-    }
-}
-
-let ExecIdGen = class {
-    i = 0;
-    next () { return new ExecId (this.i++) }
-}
-
-let ExecSeq = class {
-    map = new Map ();
-    set (a, b) { return this.map.set(a.id,b) }
-    get (a) { return this.map.get(a.id) }
     toString () {
         let s = [...this.map.values()].join(', ');
         return s;
     }
-    toStringW (id) {
+    debugString (id) {
         let s = [...this.map.keys()].map((k) =>{
-            return id.id == k ? '['+this.map.get(k)+']' : this.map.get(k)
+            return id.ptr == k ? '['+this.map.get(k)+']' : this.map.get(k)
         }).join(', ');
         return s;
     }
-}
-
-let ExecRegister = class {
-    map = new Map ();
-    set (a, b) { return this.map.set(a.id,b) }
-    get (a) { return this.map.get(a.id) }
 }
 
 const AST2Exec = {
@@ -313,19 +442,22 @@ const AST2Exec = {
     'd': ExecDelay,
     'c': ExecCallCC,
     's': ExecSubstitute,
-    'e': ExecExit,
+    'e': ExecContinuation,
+    '@': ExecRead,
+    '?': ExecCompare,
+    '|': ExecReprint,
 };
 
-let UnlambdaExecutable = class {
-    seq = new ExecSeq ();
-    inits = [];
-    r_id_gen = new ExecIdGen ();
+const UnlambdaExecutable = class {
+    states;
+    inits;
+    addr_gen;
     constructor (ast) {
         this.compile(ast);
     }
     compile (ast) {
-        this.seq = new ExecSeq ();
-        this.r_id_gen = new ExecIdGen ();
+        this.states = new ExecStates ();
+        this.addr_gen = new ExecAddrGen ();
         this.inits = [];
         for (let node of ast.top.list) {
             if (node instanceof UnlambdaASTApply) {
@@ -334,192 +466,197 @@ let UnlambdaExecutable = class {
         }
     }
     compile_node (node) {
-        let id = this.r_id_gen.next();
+        let ptr = this.addr_gen.next();
         let init = void 8;
-        let node_stack = [[node, id, void 8, void 8]];
-        let from_stack = false;
-        let left_id; let right_id;
+        let node_stack = [[node, ptr, void 8, void 8]];
+        let left_ptr; let right_ptr;
         while (node_stack.length > 0) {
-            [node, id, left_id, right_id] = node_stack.pop();
+            [node, ptr, left_ptr, right_ptr] = node_stack.pop();
             let left_valid = node.left.id != '!';
             let right_valid = node.right.id != '!';
             let left_apply = node.left.id == '`';
             let right_apply = node.right.id == '`';
             if (!init && left_valid && right_valid) {
-                init = id;
+                init = ptr;
             }
-            if (left_apply && left_id === undefined){
-                let next_i = this.r_id_gen.next();
-                node_stack.push([node, id, next_i, void 8]);
+            if (left_apply && left_ptr === undefined){
+                let next_i = this.addr_gen.next();
+                node_stack.push([node, ptr, next_i, void 8]);
                 node_stack.push([node.left, next_i, void 8, void 8]);
                 node = node.left;
-            } else if (right_apply && right_id === undefined){
-                let next_i = this.r_id_gen.next();
-                node_stack.push([node, id, left_id, next_i]);
+            } else if (right_apply && right_ptr === undefined){
+                let next_i = this.addr_gen.next();
+                node_stack.push([node, ptr, left_ptr, next_i]);
                 node_stack.push([node.right, next_i, void 8, void 8]);
                 node = node.right;
             } else if (left_valid && right_valid) {
-                let convert = (node, id) => {
+                let convert = (node, ptr) => {
                     if (node.id == '`') {
                         if (node.left.id == '!'|| node.right === '!') {
                             throw 'Application has too few arguments.'
                         }
-                        return new ExecCall(id)
+                        return new ExecCall(ptr)
                     } else {
                         let ec = AST2Exec[node.id];
-                        if (node.id == '.') {
+                        if (node.id == '.' || node.id == '?') {
                             return new ec(node.value);
+                        } else if (node.id == 'e') {
+                            return new ec(EXIT);
                         } else {
                             return new ec();
                         }
                     }
                 }
-                let left_v = convert(node.left, left_id);
-                let right_v = convert(node.right, right_id);
-                this.add_call(id, left_v, right_v);
+                let left_v = convert(node.left, left_ptr);
+                let right_v = convert(node.right, right_ptr);
+                this.states.set(ptr, new ExecCallData(left_v, right_v));
             }
         }
         return init;
     }
-    add_call (id, v1, v2) {
-        this.seq.set(id, [v1, v2]);
+    run (input, output) {
+        return this.inits.map((init)=>this.run_s(input, output, init));
     }
-    run (buf) {
-        for (let i of this.inits) this.run_s(buf, i);
-    }
-    run_s (buf, init) {
-        // arguments are always evaluated in LtR order
-        // (when they are in fact evaluated)
-        // we keep track of the evaluation as a callstack state.
-        // i think we could instead drop a function with ExecCall()s in it
-        // and add a new one with ExecValue()s
-        const EVAL_NONE = 0;
-        const EVAL_LEFT = 1;
-        const EVAL_RIGHT = 2;
-        let id; let eval_state;
-        let callstack = new ExecCallStack ([init],[EVAL_NONE]);
-        let reg = new ExecRegister ();
+    run_s (input, output, init) {
+        let ptr = init;
+        let variable = new ExecContinuation (EXIT);
+        let trail = EXIT;
+        let current_char = new ExecVoid ();
+        let states = new ExecRunningStates(this.states);
         let total = 0;
-        while (callstack.length > 0 || this.stop) {
-            console.log(callstack+'');
-            [id, eval_state] = callstack.pop()
-            if (total++ > 600) break;
-            // to obj or whatever
-            let k = 0;
-            console.log('>', callstack.length, id.id, this.seq.toStringW(id));
-            let f0 = this.seq.get(id);
-            let new_calls = new ExecCallStack ();
-            // we unshift when creating calls because we want them
-            // to evaluate in the same order (normally FILO)
-            // that they are created (FIFO)
-            const create_call = (val1, val2, t1=EVAL_NONE) => {
-                let new_id = this.r_id_gen.next();
-                this.add_call(new_id, val1, val2);
-                new_calls.unshift(new_id, t1);
-                return new ExecValue(new_id);
+        while (ptr != EXIT && total++ < 600000) {
+            //console.log(ptr+' '+variable+' >>', states.debugString(ptr));
+            let data = states.get(ptr);
+            let {left, right} = data;
+            //console.log(ptr+' '+variable+' >> '+data);
+            const add_state = (s) => {
+                let new_addr = this.addr_gen.next();
+                states.set(new_addr, s);
+                return new_addr;
             }
-            // this calls the function an ExecCall points to
-            // and then calls the caller again with updated state
-            const push_call = (id1, id2, state) => {
-                new_calls.unshift(id2, EVAL_NONE);
-                new_calls.unshift(id1, state);
-            }
-            const deref = (id) => {
-                let r = reg.get(id.id);
-                // ExecValues can be unwrapped arbitrarily
-                // tho ExecCalls cannot
-                while (r instanceof ExecValue) {
-                    r = reg.get(r.id.id);
+            if (left.id == 'X') { left = variable }
+            else if (right.id == 'X') { right = variable }
+            if (left.id == 'P') {
+                let new_d = new ExecResolvedData(new ExecVariable(), right);
+                let replacement = add_state(new_d);
+                let continuation = new ExecContinuation(replacement);
+                let next = new ExecNext(trail);
+                trail = add_state(new ExecNextData(next, continuation));
+                ptr = left.ptr;
+            } else if (left.id == 'd') {
+                variable = new ExecValue(add_state(new ExecPromiseData(right)));
+                ptr = trail;
+            } else if (right.id == 'P') {
+                let new_d = new ExecResolvedData(left, new ExecVariable());
+                let replacement = add_state(new_d);
+                let continuation = new ExecContinuation(replacement);
+                let next = new ExecNext(trail);
+                trail = add_state(new ExecNextData(next, continuation));
+                ptr = right.ptr;
+            } else if (left.id == 'V') {
+                let v = states.get(left.ptr);
+                switch (v.id) {
+                    case 'I':
+                    ptr = add_state(new ExecResolvedData(v.right, right));
+                    break;
+                    case 'D':
+                    ptr = add_state(new ExecCallData(v.right, right));
+                    break;
+                    case 'K':
+                    ptr = add_state(new ExecResolvedData(v.right, right));
+                    break;
+                    case 'S':
+                    let z = add_state(new ExecSubstituteData2(v.right, right));
+                    variable = new ExecValue(z);
+                    ptr = trail;
+                    break;
+                    case 'Z':
+                        let left_d = new ExecResolvedData(v.left, right);
+                        let right_d = new ExecResolvedData(v.right, right);
+                        let left_ptr = new ExecCall(add_state(left_d));
+                        let right_ptr = new ExecCall(add_state(right_d));
+                        let ap_d = new ExecCallData(left_ptr, right_ptr);
+                        let replacement = add_state(ap_d);
+                        ptr = replacement;
+                    break;
+                    case 'O':
+                    throw 'Something fucked up idk'
+                    case 'C':
+                    throw 'Something fucked up idk'
+                    default:
+                    throw 'Something fucked up idk'
                 }
-                return r;
-            }
-            let leftValued = f0[0] instanceof ExecValue;
-            let rightValued = f0[1] instanceof ExecValue;
-            let leftCall = f0[0] instanceof ExecCall;
-            let rightCall = f0[1] instanceof ExecCall;
-            // we could do a whole new call but its possible
-            // to just dereference here and move on
-            let f;
-            if (leftValued && rightValued
-                || leftCall && rightCall && eval_state == EVAL_RIGHT) {
-                //reg[id.id] = create_call(deref(f[0]), deref(f[1]));
-                f = [deref(f0[0]), deref(f0[1])];
-            } else if (leftValued || leftCall && (eval_state == EVAL_LEFT
-                || eval_state == EVAL_RIGHT)) {
-                f = [deref(f0[0]), f0[1]];
-            } else if (rightValued || rightCall && eval_state == EVAL_RIGHT) {
-                f = [f0[0], deref(f0[1])];
+            } else if (data.id == '&') {
+                trail = left.ptr;
+                ptr = right.ptr;
+            } else if (data.id == 'I') {
+                variable = right;
+                ptr = trail;
+            } else if (data.id == 'C' || data.id == 'O') {
+                switch (left.id) {
+                    case '.':
+                    output.push(left.value);
+                    variable = new ExecValue(add_state(new ExecIdentityData(right)));
+                    ptr = trail;
+                    break;
+                    case 'i':
+                    variable = new ExecValue(add_state(new ExecIdentityData(right)));
+                    ptr = trail;
+                    break;
+                    case 'k':
+                    variable = new ExecValue(add_state(new ExecConstantData(right)));
+                    ptr = trail;
+                    break;
+                    case 's':
+                    variable = new ExecValue(add_state(new ExecSubstituteData(right)));
+                    ptr = trail;
+                    break;
+                    case '@':
+                    let m = input.next();
+                    let read_result;
+                    if (!m.done) {
+                        read_result = new ExecVoid ();
+                    } else {
+                        current_char = new ExecChar(m.value);
+                        read_result = new ExecIdentity ()
+                    }
+                    ptr = add_state(new ExecResolvedData(right, read_result));
+                    break;
+                    case '?':
+                    let compare_result
+                    if (!current_char || current_char.value != left.value) {
+                        compare_result = new ExecVoid ();
+                    } else {
+                        compare_result = new ExecIdentity ()
+                    }
+                    ptr = add_state(new ExecResolvedData(right, compare_result));
+                    break;
+                    case '|':
+                    ptr = add_state(new ExecResolvedData(right, current_char));
+                    break;
+                    case 'Q':
+                    variable = right;
+                    ptr = left.ptr;
+                    break;
+                    case 'c':
+                    let ic = new ExecResolvedData(right, new ExecContinuation(trail))
+                    ptr = add_state(ic);
+                    break;
+                    case 'v':
+                    variable = new ExecVoid();
+                    ptr = trail;
+                    break;
+                    default:
+                    throw 'Internal runtime error: '+left+' is not recognized.'
+                }
             } else {
-                f = [f0[0], f0[1]];
+                throw 'not sure what to do with '+data
             }
-            if (f[0] instanceof ExecCall && f[1] instanceof ExecCall 
-                && eval_state == EVAL_RIGHT) {
-                // idk how the hell we could end up here.
-                // an ExecCall would have to end up in the register
-                // that maybe should be a fatal error
-                let val1 = deref(f[0]);
-                let val2 = deref(f[0]);
-                reg.set(id, create_call(val, f[1], EVAL_NONE));
-            } else if (f[0] instanceof ExecCall) {
-                if (eval_state == EVAL_RIGHT || eval_state == EVAL_RIGHT) {
-                    let val = deref(f[0]);
-                    reg.set(id, create_call(val, f[1], EVAL_NONE));
-                } else {
-                    push_call(id, f[0].id, EVAL_LEFT);
-                }
-            } else if (f[1] instanceof ExecCall) {
-                if (eval_state == EVAL_RIGHT) {
-                    let val = deref(f[1]);
-                    reg.set(id, create_call(f[0], f[1], EVAL_RIGHT));
-                } else if (f[0] instanceof ExecDelay) {
-                    // don't execute anything
-                    reg.set(id, new ExecPromise(f[1]));
-                } else {
-                    push_call(id, f[1].id, EVAL_RIGHT);
-                }
-            } else if (f[0] instanceof ExecChar) {
-                buf.push(f[0].value); // write character
-                reg.set(id, f[1]);
-            } else if (f[0] instanceof ExecIdentity) {
-                reg.set(id, f[1]);
-            } else if (f[0] instanceof ExecConstant) {
-                reg.set(id, new ExecConstant1(f[1]));
-            } else if (f[0] instanceof ExecConstant1) {
-                reg.set(id, f[0].value);
-            } else if (f[0] instanceof ExecSubstitute) {
-                reg.set(id, new ExecSubstitute1(f[1]));
-            } else if (f[0] instanceof ExecSubstitute1) {
-                reg.set(id, new ExecSubstitute2(f[0].x, f[1]));
-            } else if (f[0] instanceof ExecSubstitute2) {
-                let id1 = create_call(f[0].x, f[1]);
-                let id2 = create_call(f[0].y, f[1]);
-                reg.set(id, create_call(id1, id2, EVAL_RIGHT));
-            } else if (f[0] instanceof ExecCallCC) {
-                let continuation = callstack.clone();
-                reg.set(id, create_call(f[1], new ExecCC(id,continuation)));
-            } else if (f[0] instanceof ExecCC) {
-                console.log('cc', f[0].id, ''+f[1]);
-                reg.set(f[0].id, f[1]);
-                callstack = f[0].continuation.clone();
-            } else if (f[0] instanceof ExecDelay) {
-                reg.set(id, f[1]);
-            } else if (f[0] instanceof ExecPromise) {
-                reg.set(id, create_call(f[0].value, f[1], EVAL_NONE));
-            } else if (f[0] instanceof ExecExit) {
-                callstack = new ExecCallStack ();
-            } else {
-                throw 'Execution error: '+f[0]+" not supported.\n"
-                    +"Call at p"+id+": "+f[0]+" "+f[1]+"\n"
-                    +callstack;
-            }
-            callstack.append(new_calls);
-            console.log(reg.map.size, id.id, [...this.seq.map.keys()].map((k)=>
-                id.id == k ? '['+(reg.map.get(k)||'<>')+']' : ''+(reg.map.get(k)||'<>')
-            ).join(', '));
         }
+        return [total, states.size()];
     }
     toString () {
-        return this.seq+'';
+        return this.states+'';
     }
 }
 
@@ -528,6 +665,8 @@ let parser = new Unlambda ();
 const code_pad = document.getElementById('code');
 const run_button = document.getElementById('run');
 const stop_button = document.getElementById('stop');
+const input_place = document.getElementById('input');
+const status_place = document.getElementById('status');
 const parse_place = document.getElementById('parse');
 const executable_place = document.getElementById('executable');
 const output_place = document.getElementById('output');
@@ -535,20 +674,43 @@ const error_place = document.getElementById('error');
 let exec;
 run_button.addEventListener('click', (e) => {
     let code_source = code_pad.value;
+    status_place.innerText = '';
     parse_place.innerText = '';
     output_place.innerText = '';
     error_place.innerText = '';
     try {
+        status_place.append('Parsing.. ');
+        let p_t = Date.now();
         let ast = parser.parse(code_source);
-        parse_place.innerText = ''+ast;
+        //parse_place.innerText = ''+ast;
+        parse_place.innerText = 'Parsed in '+(Date.now()-p_t)/1000+'s.';
+        let c_t = Date.now();
+        status_place.append('Compiling.. ');
         exec = ast.compile();
-        executable_place.innerText = ''+exec;
-        let buf = new class {
+        //executable_place.innerText = ''+exec;
+        executable_place.innerText = 'Compiled in '+(Date.now()-c_t)/1000+'s'
+            + ' to size ' + exec.states.size()+'.';
+        let output = new class {
             push (arg) {
                 output_place.append(arg);
             }
         }();
-        exec.run(buf);
+        let input = new class {
+            next (arg) {
+                //input_place.enable();
+                //input_place.disable();
+                let next = input_place.value[0];
+                input_place.value = input_place.value.slice(1);
+                return { done: !!next, value: next };
+            }
+        }();
+        status_place.append('Running.. ');
+        let r_t = Date.now();
+        let results = exec.run(input, output);
+        status_place.append('Done. Ran in '+(Date.now()-r_t)/1000
+            +'s with ['+
+            results.map(([total,size])=>'iter '+total+', size '+size).join('; ')
+            +'].');
     } catch (e) {
         console.error(e);
         error_place.innerText = ''+e;
@@ -565,7 +727,10 @@ stop_button.addEventListener('click', (e) => {
 <textarea id=code cols=100 rows=25></textarea>
 <span class=right>
 <input type=button value=run id=run
-/><input type=button value=stop id=stop /><br>
+/><input type=button value=stop id=stop />
+Input: <input type=text id=input />
+<br>
+<b>Status: </b><span id=status></span>
 <b>AST: </b><span id=parse></span>
 <b>ASM: </b><span id=executable></span>
 <b>Out: </b><span id=output></span>
