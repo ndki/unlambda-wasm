@@ -7,11 +7,21 @@
     display: flex;
 }
 .right {
+    margin-left: 12px;
     vertical-align: top;
     display: inline-block;
     font-family: sans-serif;
     font-size: 12px;
     white-space: pre-wrap;
+}
+#output {
+    font-family: monospace;
+}
+#input {
+    height: 14px;
+}
+#input_container * {
+    vertical-align: bottom;
 }
 </style>
 <script type="module">
@@ -36,7 +46,7 @@ run_button.addEventListener('click', (e) => {
     error_place.innerText = '';
     let ast;
     try {
-        status_place.append('Parsing.. ');
+        status_place.innerText = 'Parsing.. ';
         let p_t = Date.now();
         ast = parser.parse(code_source);
         //parse_place.innerText = ''+ast;
@@ -47,34 +57,51 @@ run_button.addEventListener('click', (e) => {
         console.error(e);
     }
     if (ast) {
-        status_place.append('Compiling.. ');
+        status_place.innerText = 'Compiling.. ';
         let c_t = Date.now();
         let exec = ast.compile();
         //executable_place.innerText = ''+exec;
         executable_place.innerText = 'Compiled in '+(Date.now()-c_t)/1000+'s'
             + ' to size ' + exec.states.size()+'.';
         stop_button.addEventListener('click', (e) => { exec.stop() });
+        let r_t;
         let output = new class {
             push (arg) {
                 output_place.append(arg);
             }
             done () {
-                status_place.append('Done.');
+                status_place.innerText = 'Done. Elapsed time: '+(Date.now()-r_t)/1000+'s. ';
             }
         }();
         let input = new class {
             eof = false;
             next (arg) {
                 let next = input_place.value[0];
-                input_place.value = input_place.value.slice(1);
-                return { done: !!next, value: next };
+                if (next !== undefined) {
+                    input_place.value = input_place.value.slice(1);
+                    let echo = output_place.lastChild;
+                    if (!echo || echo.className != 'input_echo') {
+                        echo = document.createElement('b');
+                        echo.className = 'input_echo';
+                    }
+                    echo.append(next);
+                    output_place.appendChild(echo);
+                    return { done: false, value: next };
+                } else {
+                    return { done: true, value: void 8 };
+                }
             }
             restart (state_machine) {
+                let paused_time = Date.now();
+                status_place.innerText = 'Current size: '+state_machine.states.size()+'. '
+                    + 'Elapsed time: '+(Date.now()-r_t)/1000 +'s. '
+                    + 'Pending input. ';
                 let check_input = (e) => {
                     if (input_place.value) {
                         input_place.removeEventListener('input', check_input);
                         eof_place.removeEventListener('click', set_eof);
                         state_machine.exit = false;
+                        r_t += Date.now() - paused_time;
                         state_machine.run(input, output);
                     }
                 };
@@ -83,6 +110,7 @@ run_button.addEventListener('click', (e) => {
                     eof_place.removeEventListener('click', set_eof);
                     this.eof = true;
                     state_machine.exit = false;
+                    r_t += Date.now() - paused_time;
                     state_machine.run(input, output);
                 }
                 input_place.addEventListener('input', check_input);
@@ -90,7 +118,7 @@ run_button.addEventListener('click', (e) => {
             }
         }();
         status_place.append('Running.. ');
-        let r_t = Date.now();
+        r_t = Date.now();
         //let results = exec.run(input, output);
         exec.run(input, output);
     }
@@ -100,17 +128,19 @@ run_button.addEventListener('click', (e) => {
 </head>
 <body>
 <div class=main_container>
-<textarea id=code cols=100 rows=25></textarea>
+<textarea id=code cols=80 rows=25 spellcheck=false wrap=off autocapitalize=none autocomplete=off></textarea>
 <span class=right>
 <input type=button value=run id=run
 /><input type=button value=stop id=stop />
-Input: <input type=text id=input /><input type=button value=done id=eof />
 <br>
 <b>Status: </b><span id=status></span>
 <b>AST: </b><span id=parse></span>
 <b>ASM: </b><span id=executable></span>
 <b>Out: </b><span id=output></span>
 <b>Err: </b><span id=error></span>
+<span id=input_container ><textarea id=input wrap=off cols=20 rows=1 autocapitalize=none
+autocomplete=off placeholder=Input spellcheck=false
+></textarea><input type=button value=done id=eof /></span>
 </span>
 </div>
 </body>

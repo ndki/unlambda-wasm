@@ -618,7 +618,7 @@ const StateMachine = class {
                     break;
                     case FunctionId.Read:
                     let m = input.next();
-                    if (m.done) {
+                    if (!m.done) {
                         this.current_char = CharFn.Print(m.value);
                         this.ptr = states.add_resolved(rsv.right, SymbolFn.Identity);
                     } else if (input.eof) {
