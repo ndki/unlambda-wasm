@@ -22,58 +22,78 @@ const code_pad = document.getElementById('code');
 const run_button = document.getElementById('run');
 const stop_button = document.getElementById('stop');
 const input_place = document.getElementById('input');
+const eof_place = document.getElementById('eof');
 const status_place = document.getElementById('status');
 const parse_place = document.getElementById('parse');
 const executable_place = document.getElementById('executable');
 const output_place = document.getElementById('output');
 const error_place = document.getElementById('error');
-let exec;
 run_button.addEventListener('click', (e) => {
     let code_source = code_pad.value;
     status_place.innerText = '';
     parse_place.innerText = '';
     output_place.innerText = '';
     error_place.innerText = '';
+    let ast;
     try {
         status_place.append('Parsing.. ');
         let p_t = Date.now();
-        let ast = parser.parse(code_source);
+        ast = parser.parse(code_source);
         //parse_place.innerText = ''+ast;
         parse_place.innerText = 'Parsed in '+(Date.now()-p_t)/1000+'s.';
-        let c_t = Date.now();
+    } catch (e) {
+        parse_place.innerText = 'Parse failed.';
+        error_place.innerText = ''+e;
+        console.error(e);
+    }
+    if (ast) {
         status_place.append('Compiling.. ');
-        exec = ast.compile();
+        let c_t = Date.now();
+        let exec = ast.compile();
         //executable_place.innerText = ''+exec;
         executable_place.innerText = 'Compiled in '+(Date.now()-c_t)/1000+'s'
             + ' to size ' + exec.states.size()+'.';
+        stop_button.addEventListener('click', (e) => { exec.stop() });
         let output = new class {
             push (arg) {
                 output_place.append(arg);
             }
+            done () {
+                status_place.append('Done.');
+            }
         }();
         let input = new class {
+            eof = false;
             next (arg) {
-                //input_place.enable();
-                //input_place.disable();
                 let next = input_place.value[0];
                 input_place.value = input_place.value.slice(1);
                 return { done: !!next, value: next };
             }
+            restart (state_machine) {
+                let check_input = (e) => {
+                    if (input_place.value) {
+                        input_place.removeEventListener('input', check_input);
+                        eof_place.removeEventListener('click', set_eof);
+                        state_machine.exit = false;
+                        state_machine.run(input, output);
+                    }
+                };
+                let set_eof = (e) => {
+                    input_place.removeEventListener('input', check_input);
+                    eof_place.removeEventListener('click', set_eof);
+                    this.eof = true;
+                    state_machine.exit = false;
+                    state_machine.run(input, output);
+                }
+                input_place.addEventListener('input', check_input);
+                eof_place.addEventListener('click', set_eof);
+            }
         }();
         status_place.append('Running.. ');
         let r_t = Date.now();
-        let results = exec.run(input, output);
-        status_place.append('Done. Ran in '+(Date.now()-r_t)/1000
-            +'s with ['+
-            results.map(([total,size])=>'iter '+total+', size '+size).join('; ')
-            +'].');
-    } catch (e) {
-        console.error(e);
-        error_place.innerText = ''+e;
+        //let results = exec.run(input, output);
+        exec.run(input, output);
     }
-});
-stop_button.addEventListener('click', (e) => {
-    exec.stop = true;
 });
 }
 </script>
@@ -84,7 +104,7 @@ stop_button.addEventListener('click', (e) => {
 <span class=right>
 <input type=button value=run id=run
 /><input type=button value=stop id=stop />
-Input: <input type=text id=input />
+Input: <input type=text id=input /><input type=button value=done id=eof />
 <br>
 <b>Status: </b><span id=status></span>
 <b>AST: </b><span id=parse></span>

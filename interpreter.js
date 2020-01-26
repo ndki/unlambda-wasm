@@ -56,7 +56,7 @@ export const Unlambda = class {
     }
 }
 
-export const UnlambdaExecutable = class {
+export const UnlambdaCompiler = class {
     states;
     inits;
     constructor (ast) {
@@ -121,10 +121,14 @@ export const UnlambdaExecutable = class {
         return init;
     }
     run (input, output) {
-        return this.inits.map((init)=>this.run_s(input, output, init));
+        this.inits.map((init)=>this.run_s(input, output, init));
     }
     run_s (input, output, init) {
-        return this.states.clone().run(input, output, init);
+        this.state_machine = new StateMachine(this.states.clone(), init);
+        this.state_machine.run(input, output);
+    }
+    exit () {
+        this.state_machine.exit = true;
     }
     toString () {
         return this.states+'';
@@ -139,7 +143,7 @@ const UnlambdaAST = class {
         return ''+this.top;
     }
     compile () {
-        return new UnlambdaExecutable (this);
+        return new UnlambdaCompiler (this);
     }
 }
 const UnlambdaASTNode = class {
@@ -531,19 +535,27 @@ const StateData = class {
     toString () {
         return [...this.states.values()].join(' ');
     }
-    run (input, output, ptr) {
-        let variable = PointerFn.Continuation(EXIT);
-        let trail = EXIT;
-        let current_char = SymbolFn.Void;
-        let states = this;
-        let total = 0;
-        while (ptr.type != StateType.Exit && total++ < 600000) {
-            switch (ptr.type) {
+}
+
+const StateMachine = class {
+    variable = PointerFn.Continuation(EXIT);
+    current_char = SymbolFn.Void;
+    trail = EXIT;
+    ptr; states;
+    exit = false;
+    constructor (states, init) {
+        this.states = states;
+        this.ptr = init;
+    }
+    run (input, output) {
+        let states = this.states;
+        while (this.ptr.type != StateType.Exit && !this.exit) {
+            switch (this.ptr.type) {
                 case StateType.Call:
-                let call = states.get_call(ptr);
-                //console.log(''+ptr+' <'+call.left+' '+call.right+'> <- '+variable);
-                if (call.left.id == FunctionId.Variable) { call.left = variable }
-                else if (call.right.id == FunctionId.Variable) { call.right = variable }
+                let call = states.get_call(this.ptr);
+                //console.log(''+this.ptr+' <'+call.left+' '+call.right+'> <- '+this.variable);
+                if (call.left.id == FunctionId.Variable) { call.left = this.variable }
+                else if (call.right.id == FunctionId.Variable) { call.right = this.variable }
                 if (call.left.id == FunctionId.Call) {
                     // adding a chain ensures we come back to <replacement>
                     // after we resolve left.ptr
@@ -553,31 +565,31 @@ const StateData = class {
                     } else {
                         replacement = states.add_resolved(SymbolFn.Variable, call.right);
                     }
-                    trail = states.add_chain(replacement, trail);
-                    ptr = call.left.ptr;
+                    this.trail = states.add_chain(replacement, this.trail);
+                    this.ptr = call.left.ptr;
                 } else if (call.left.id == FunctionId.Delay) {
-                    variable = PointerFn.Literal(states.add_promise(call.right));
-                    ptr = trail;
+                    this.variable = PointerFn.Literal(states.add_promise(call.right));
+                    this.ptr = this.trail;
                 } else if (call.right.id == FunctionId.Call) {
                     let replacement = states.add_resolved(call.left, SymbolFn.Variable);
-                    trail = states.add_chain(replacement, trail);
-                    ptr = call.right.ptr;
+                    this.trail = states.add_chain(replacement, this.trail);
+                    this.ptr = call.right.ptr;
                 } else {
-                    ptr = states.add_resolved(call.left, call.right);
+                    this.ptr = states.add_resolved(call.left, call.right);
                 }
                 break;
                 case StateType.Resolved:
-                let rsv = states.get_resolved(ptr);
-                //console.log(''+ptr+' ['+rsv.left+' '+rsv.right+'] <- '+variable);
-                if (rsv.left.id == FunctionId.Variable) { rsv.left = variable }
-                else if (rsv.right.id == FunctionId.Variable) { rsv.right = variable }
+                let rsv = states.get_resolved(this.ptr);
+                //console.log(''+this.ptr+' ['+rsv.left+' '+rsv.right+'] <- '+this.variable);
+                if (rsv.left.id == FunctionId.Variable) { rsv.left = this.variable }
+                else if (rsv.right.id == FunctionId.Variable) { rsv.right = this.variable }
                 // the function determines what we do
                 switch (rsv.left.id) {
                     // tentatively putting void first since it
                     // should tend to propagate
                     case FunctionId.Void:
-                    variable = SymbolFn.Void;
-                    ptr = trail;
+                    this.variable = SymbolFn.Void;
+                    this.ptr = this.trail;
                     break;
                     // in a resolved state, print delay & identity
                     // have a similar effect
@@ -585,69 +597,70 @@ const StateData = class {
                     output.push(rsv.left.value);
                     case FunctionId.Delay:
                     case FunctionId.Identity:
-                    variable = rsv.right;
-                    ptr = trail;
+                    this.variable = rsv.right;
+                    this.ptr = this.trail;
                     break;
                     case FunctionId.Continuation:
-                    variable = rsv.right;
-                    ptr = rsv.left.ptr;
+                    this.variable = rsv.right;
+                    this.ptr = rsv.left.ptr;
                     break;
                     case FunctionId.CallCC:
-                    let continuation = PointerFn.Continuation(trail);
-                    ptr = states.add_resolved(rsv.right, continuation);
+                    let continuation = PointerFn.Continuation(this.trail);
+                    this.ptr = states.add_resolved(rsv.right, continuation);
                     break;
                     case FunctionId.Constant:
-                    variable = PointerFn.Literal(states.add_constant(rsv.right));
-                    ptr = trail;
+                    this.variable = PointerFn.Literal(states.add_constant(rsv.right));
+                    this.ptr = this.trail;
                     break;
                     case FunctionId.Substitute:
-                    variable = PointerFn.Literal(states.add_substitute(rsv.right));
-                    ptr = trail;
+                    this.variable = PointerFn.Literal(states.add_substitute(rsv.right));
+                    this.ptr = this.trail;
                     break;
                     case FunctionId.Read:
                     let m = input.next();
-                    let read_result;
-                    if (!m.done) {
-                        read_result = SymbolFn.Void;
+                    if (m.done) {
+                        this.current_char = CharFn.Print(m.value);
+                        this.ptr = states.add_resolved(rsv.right, SymbolFn.Identity);
+                    } else if (input.eof) {
+                        this.ptr = states.add_resolved(rsv.right, SymbolFn.Void);
                     } else {
-                        current_char = CharFn.Print(m.value);
-                        read_result = SymbolFn.Identity;
+                        input.restart(this);
+                        this.exit = true;
                     }
-                    ptr = states.add_resolved(rsv.right, read_result);
                     break;
                     case FunctionId.Compare:
                     let compare_result;
-                    if (!current_char || current_char.value != rsv.left.value) {
+                    if (!this.current_char || this.current_char.value != rsv.left.value) {
                         compare_result = SymbolFn.Void;
                     } else {
                         compare_result = SymbolFn.Identity;
                     }
-                    ptr = states.add_resolved(rsv.right, compare_result);
+                    this.ptr = states.add_resolved(rsv.right, compare_result);
                     break;
                     case FunctionId.Reprint:
-                    ptr = states.add_resolved(rsv.right, current_char);
+                    this.ptr = states.add_resolved(rsv.right, this.current_char);
                     break;
                     // our function is the result of some resolved function
                     case FunctionId.Literal:
                     switch (rsv.left.ptr.type) {
                         case StateType.Identity:
                         let value = states.get_identity(rsv.left.ptr);
-                        ptr = states.add_resolved(value, rsv.right);
+                        this.ptr = states.add_resolved(value, rsv.right);
                         break;
                         case StateType.Promise:
                         let promise = states.get_promise(rsv.left.ptr);
-                        ptr = states.add_call(promise, rsv.right);
+                        this.ptr = states.add_call(promise, rsv.right);
                         break;
                         case StateType.Constant:
                         let constant = states.get_constant(rsv.left.ptr);
-                        variable = constant;
-                        ptr = trail;
+                        this.variable = constant;
+                        this.ptr = this.trail;
                         break;
                         case StateType.Substitute:
                         let subst = states.get_substitute(rsv.left.ptr);
                         let z = states.add_substitute2(subst, rsv.right);
-                        variable = PointerFn.Literal(z);
-                        ptr = trail;
+                        this.variable = PointerFn.Literal(z);
+                        this.ptr = this.trail;
                         break;
                         case StateType.Substitute2:
                         let subst2 = states.get_substitute2(rsv.left.ptr);
@@ -656,7 +669,7 @@ const StateData = class {
                         let left_fn = PointerFn.Call(left_ptr);
                         let right_fn = PointerFn.Call(right_ptr);
                         let replacement = states.add_call(left_fn, right_fn);
-                        ptr = replacement;
+                        this.ptr = replacement;
                         break;
                         case StateType.Resolved:
                         throw 'Cannot double resolve.';
@@ -674,17 +687,12 @@ const StateData = class {
                 }
                 break;
                 case StateType.Chain:
-                let chain = states.get_chain(ptr);
-                //console.log(''+ptr+' '+chain.left+' -> '+chain.right);
-                trail = chain.right;
-                ptr = chain.left;
+                let chain = states.get_chain(this.ptr);
+                //console.log(''+this.ptr+' '+chain.left+' -> '+chain.right);
+                this.trail = chain.right;
+                this.ptr = chain.left;
                 break;
                 case StateType.Identity:
-                // we actually want to throw here.
-                variable = states.get_identity(ptr);
-                //console.log(''+ptr+'get '+variable);
-                ptr = trail;
-                break;
                 case StateType.Substitute2:
                 case StateType.Constant:
                 case StateType.Substitute:
@@ -695,6 +703,8 @@ const StateData = class {
                 throw "Unknown state type in "+ptr;
             }
         }
-        return [total, states.size()];
+        if (this.ptr.type == StateType.Exit) {
+            output.done();
+        }
     }
 }
