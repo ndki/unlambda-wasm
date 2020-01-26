@@ -16,9 +16,75 @@
 </style>
 <script>
 'use strict;'
+let Unlambda = class {
+    parse (source) {
+        let ast = new UnlambdaAST ();
+        let node_stack = [ast.top];
+        const READ = 0;
+        const CHAR = 1;
+        const CMMT = 2;
+        let state = READ;
+        let node = new UnlambdaASTNode ();
+        for (let c of source) {
+            if (state == READ && c.match(/\S/)) {
+                const char_map = {
+                    '`': UnlambdaASTApply,
+                    'e': UnlambdaASTExit,
+                    's': UnlambdaASTSubstitute,
+                    'k': UnlambdaASTConstant,
+                    'i': UnlambdaASTIdentity,
+                    'v': UnlambdaASTVoid,
+                    'd': UnlambdaASTDelay,
+                    'c': UnlambdaASTCallCC,
+                };
+                let type = char_map[c];
+                if (type === undefined) {
+                    if (c == '.') {
+                        node = new UnlambdaASTChar ();
+                        state = CHAR;
+                    } else if (c == 'r') {
+                        node = new UnlambdaASTChar ();
+                        node.value = "\n";
+                    } else if (c == '#') {
+                        state = CMMT;
+                    } else {
+                        throw 'Parse error: Unrecognized character '+c+'.'
+                    }
+                } else {
+                    node = new char_map[c] ();
+                }
+                if (node.id != '!') {
+                    let next = node_stack.pop().add(node);
+                    if (next !== undefined) node_stack.push(...next);
+                }
+            } else if (state == CHAR) {
+                node.value = c;
+                state = READ;
+            } else if (state == CMMT) {
+                if (c == "\n") state = READ;
+            }
+        }
+        return ast;
+    }
+    run () {
+    }
+}
+let UnlambdaAST = class {
+    top;
+    constructor () {
+        this.top = new UnlambdaASTTop ();
+    }
+    toString () {
+        return ''+this.top;
+    }
+    compile () {
+        return new UnlambdaExecutable (this);
+    }
+}
 let UnlambdaASTNode = class {
-    get name () { }
+    get name () { return 'empty' }
     get data () { return false }
+    get id () { return '!' }
     static toString () {
         return '[empty]';
     }
@@ -45,18 +111,19 @@ let UnlambdaASTTop = class {
 let UnlambdaASTApply = class extends UnlambdaASTNode {
     get name () { return 'apply' }
     get data () { return true }
-    first = UnlambdaASTNode;
-    second = UnlambdaASTNode;
+    get id () { return '`' }
+    left = new UnlambdaASTNode ();
+    right = new UnlambdaASTNode ();
     add (node) {
-        if (this.first === UnlambdaASTNode) {
-            this.first = node;
+        if (this.left.id == '!') {
+            this.left = node;
             if (node.data) {
                 return [this, node];
             } else {
                 return [this];
             }
-        } else if (this.second === UnlambdaASTNode) {
-            this.second = node;
+        } else if (this.right.id == '!') {
+            this.right = node;
             if (node.data) {
                 return [node];
             } else {
@@ -67,32 +134,40 @@ let UnlambdaASTApply = class extends UnlambdaASTNode {
         }
     }
     toString () {
-        return '`(' + this.first + ' ' + this.second + ')';
+        return '`(' + this.left + ' ' + this.right + ')';
     }
 }
 let UnlambdaASTConstant = class extends UnlambdaASTNode {
     get name () { return 'const' }
+    get id () { return 'k' }
 }
 let UnlambdaASTSubstitute = class extends UnlambdaASTNode {
     get name () { return 'sub' }
+    get id () { return 's' }
 }
 let UnlambdaASTIdentity = class extends UnlambdaASTNode {
     get name () { return 'id' }
+    get id () { return 'i' }
 }
 let UnlambdaASTVoid = class extends UnlambdaASTNode {
     get name () { return 'void' }
+    get id () { return 'v' }
 }
 let UnlambdaASTCallCC = class extends UnlambdaASTNode {
     get name () { return 'call/cc' }
+    get id () { return 'c' }
 }
 let UnlambdaASTDelay = class extends UnlambdaASTNode {
     get name () { return 'delay' }
+    get id () { return 'd' }
 }
 let UnlambdaASTExit = class extends UnlambdaASTNode {
     get name () { return 'exit' }
+    get id () { return 'e' }
 }
 let UnlambdaASTChar = class extends UnlambdaASTNode {
     get name () { return 'char' }
+    get id () { return '.' }
     value = '';
     toString () {
         return '[char ' + this.value + ']';
@@ -103,16 +178,19 @@ let ExecData = class {
     toString () { return 'DATA' }
 }
 let ExecId = class {
+    id;
+    constructor (id) { this.id = id }
+    toString () { return '['+this.id+']' }
+}
+let ExecCall = class {
+    id = ExecId;
     constructor (id) { this.id = id }
     toString () { return 'P' + this.id }
 }
-let ExecVisited = class extends ExecId {
-    constructor (id) { super(); this.id = id.id }
+let ExecValue = class {
+    id = ExecId;
+    constructor (id) { this.id = id }
     toString () { return 'V' + this.id }
-}
-let ExecIdGen = class {
-    i = 0;
-    next () { return new ExecId (this.i++) }
 }
 let ExecVoid = class {
     toString () { return 'v' }
@@ -159,263 +237,303 @@ let ExecChar = class {
     constructor (v) { this.value = v }
     toString () { return 'C'+this.value }
 }
-//let ExecConstant1 = class { constructor (x) { this.x = x } }
-//let ExecConstant2 = class { constructor (x) { this.x = x } }
+let ExecCallStack = class {
+    locations;
+    status;
+    constructor (locations=[], status=[]) {
+        this.locations = locations;
+        this.status = status;
+    }
+    get length () { return this.locations.length }
+    clone () {
+        // we will need to increase reference counts here
+        return new this.constructor (
+            this.locations.slice(0),
+            this.status.slice(0)
+        );
+    }
+    pop () {
+        return [this.locations.pop(), this.status.pop()]
+    }
+    append (cs) {
+        this.locations.push(...cs.locations);
+        this.status.push(...cs.status);
+    }
+    unshift (new_l, new_s) {
+        this.locations.unshift(new_l);
+        this.status.unshift(new_s);
+    }
+    push (new_l, new_s) {
+        this.locations.push(new_l);
+        this.status.push(new_s);
+    }
+    toString () {
+        const message = ['Fresh', 'Partial', 'Complete'];
+        let s = "Continuation:\n";
+        for (let i = this.length-1; i >= 0; i--) {
+            s += message[this.status[i]]
+                +' call at P'+this.locations[i]+"\n";
+        }
+        return s;
+    }
+}
+
+let ExecIdGen = class {
+    i = 0;
+    next () { return new ExecId (this.i++) }
+}
+
+let ExecSeq = class {
+    map = new Map ();
+    set (a, b) { return this.map.set(a.id,b) }
+    get (a) { return this.map.get(a.id) }
+    toString () {
+        let s = [...this.map.values()].join(', ');
+        return s;
+    }
+    toStringW (id) {
+        let s = [...this.map.keys()].map((k) =>{
+            return id.id == k ? '['+this.map.get(k)+']' : this.map.get(k)
+        }).join(', ');
+        return s;
+    }
+}
+
+let ExecRegister = class {
+    map = new Map ();
+    set (a, b) { return this.map.set(a.id,b) }
+    get (a) { return this.map.get(a.id) }
+}
+
+const AST2Exec = {
+    '.': ExecChar,
+    'k': ExecConstant,
+    'i': ExecIdentity,
+    'v': ExecVoid,
+    'd': ExecDelay,
+    'c': ExecCallCC,
+    's': ExecSubstitute,
+    'e': ExecExit,
+};
+
 let UnlambdaExecutable = class {
-    seq = [];
+    seq = new ExecSeq ();
+    inits = [];
+    r_id_gen = new ExecIdGen ();
     constructor (ast) {
+        this.compile(ast);
+    }
+    compile (ast) {
+        this.seq = new ExecSeq ();
         this.r_id_gen = new ExecIdGen ();
-        this.r_ids = [];
         this.inits = [];
-        for (let node0 of ast.top.list) {
-            if (node0 instanceof UnlambdaASTApply) {
-                let id = this.r_id_gen.next();
-                let init = false;
-                let node_stack = [[node0, id, void 8, void 8]];
-                let from_stack = false;
-                let node; let first_id; let second_id;
-                while (node_stack.length > 0) {
-                    [node, id, first_id, second_id] = node_stack.pop();
-                    let nfe = node.first !== UnlambdaASTNode;
-                    let nse = node.second !== UnlambdaASTNode;
-                    let nf = node.first instanceof UnlambdaASTApply;
-                    let ns = node.second instanceof UnlambdaASTApply;
-                    if (!init && nfe && nse) {
-                        init = true;
-                        this.inits.push(id);
-                    }
-                    if (nf && first_id === undefined){
-                        let next_i = this.r_id_gen.next();
-                        node_stack.push([node, id, next_i, void 8]);
-                        node_stack.push([node.first, next_i, void 8, void 8]);
-                        node = node.first;
-                    } else if (ns && second_id === undefined){
-                        let next_i = this.r_id_gen.next();
-                        node_stack.push([node, id, first_id, next_i]);
-                        node_stack.push([node.second, next_i, void 8, void 8]);
-                        node = node.second;
-                    } else if (nfe && nse) {
-                        let convert = (node, id) => {
-                            if (node instanceof UnlambdaASTApply) {
-                                if (node.first === UnlambdaASTNode
-                                    || node.second === UnlambdaASTNode) {
-                                    throw 'Listen idk what to do with that. Add more letters.'
-                                }
-                                return id
-                            } else if (node instanceof UnlambdaASTChar) {
-                                return new ExecChar(node.value)
-                            } else if (node instanceof UnlambdaASTConstant) {
-                                return new ExecConstant()
-                            } else if (node instanceof UnlambdaASTIdentity) {
-                                return new ExecIdentity()
-                            } else if (node instanceof UnlambdaASTVoid) {
-                                return new ExecVoid()
-                            } else if (node instanceof UnlambdaASTDelay) {
-                                return new ExecDelay()
-                            } else if (node instanceof UnlambdaASTCallCC) {
-                                return new ExecCallCC()
-                            } else if (node instanceof UnlambdaASTSubstitute) {
-                                return new ExecSubstitute()
-                            } else if (node instanceof UnlambdaASTExit) {
-                                return new ExecExit()
-                            }
-                        }
-                        let cf = convert(node.first, first_id);
-                        let cs = convert(node.second, second_id);
-                        let ff = this.add_call(id, cf, cs);
-                    }
-                }
+        for (let node of ast.top.list) {
+            if (node instanceof UnlambdaASTApply) {
+                this.inits.push(this.compile_node(node));
             }
         }
     }
+    compile_node (node) {
+        let id = this.r_id_gen.next();
+        let init = void 8;
+        let node_stack = [[node, id, void 8, void 8]];
+        let from_stack = false;
+        let left_id; let right_id;
+        while (node_stack.length > 0) {
+            [node, id, left_id, right_id] = node_stack.pop();
+            let left_valid = node.left.id != '!';
+            let right_valid = node.right.id != '!';
+            let left_apply = node.left.id == '`';
+            let right_apply = node.right.id == '`';
+            if (!init && left_valid && right_valid) {
+                init = id;
+            }
+            if (left_apply && left_id === undefined){
+                let next_i = this.r_id_gen.next();
+                node_stack.push([node, id, next_i, void 8]);
+                node_stack.push([node.left, next_i, void 8, void 8]);
+                node = node.left;
+            } else if (right_apply && right_id === undefined){
+                let next_i = this.r_id_gen.next();
+                node_stack.push([node, id, left_id, next_i]);
+                node_stack.push([node.right, next_i, void 8, void 8]);
+                node = node.right;
+            } else if (left_valid && right_valid) {
+                let convert = (node, id) => {
+                    if (node.id == '`') {
+                        if (node.left.id == '!'|| node.right === '!') {
+                            throw 'Application has too few arguments.'
+                        }
+                        return new ExecCall(id)
+                    } else {
+                        let ec = AST2Exec[node.id];
+                        if (node.id == '.') {
+                            return new ec(node.value);
+                        } else {
+                            return new ec();
+                        }
+                    }
+                }
+                let left_v = convert(node.left, left_id);
+                let right_v = convert(node.right, right_id);
+                this.add_call(id, left_v, right_v);
+            }
+        }
+        return init;
+    }
     add_call (id, v1, v2) {
-        this.seq[id.id] = [v1, v2];
+        this.seq.set(id, [v1, v2]);
     }
     run (buf) {
         for (let i of this.inits) this.run_s(buf, i);
     }
     run_s (buf, init) {
-        let id; let first; let second;
-        let callstack = [[init,false,false]];
-        let reg = [];
+        // arguments are always evaluated in LtR order
+        // (when they are in fact evaluated)
+        // we keep track of the evaluation as a callstack state.
+        // i think we could instead drop a function with ExecCall()s in it
+        // and add a new one with ExecValue()s
+        const EVAL_NONE = 0;
+        const EVAL_LEFT = 1;
+        const EVAL_RIGHT = 2;
+        let id; let eval_state;
+        let callstack = new ExecCallStack ([init],[EVAL_NONE]);
+        let reg = new ExecRegister ();
         let total = 0;
-        /// Okay so the errors here probably come from
-        /// the pointers and the weird hacky bullshit i done
-        while (callstack.length > 0) {
-            [id,first,second] = callstack.pop()
-            if (total++ > 60000) break;
+        while (callstack.length > 0 || this.stop) {
+            console.log(callstack+'');
+            [id, eval_state] = callstack.pop()
+            if (total++ > 600) break;
             // to obj or whatever
-            /*
             let k = 0;
-            console.log(callstack.length, id.id, this.seq.map(()=>
-                id.id == k ? '['+this.seq[k++]+']' : this.seq[k++]
-            ).join(', '));
-            */
-            let f = this.seq[id.id];
-            let new_calls = []
-            const create_call = (val1, val2, t1=false, t2=false) => {
-                let new_id = new ExecVisited(this.r_id_gen.next());
+            console.log('>', callstack.length, id.id, this.seq.toStringW(id));
+            let f0 = this.seq.get(id);
+            let new_calls = new ExecCallStack ();
+            // we unshift when creating calls because we want them
+            // to evaluate in the same order (normally FILO)
+            // that they are created (FIFO)
+            const create_call = (val1, val2, t1=EVAL_NONE) => {
+                let new_id = this.r_id_gen.next();
                 this.add_call(new_id, val1, val2);
-                new_calls.unshift([new_id, t1, t2]);
-                return new_id;
+                new_calls.unshift(new_id, t1);
+                return new ExecValue(new_id);
             }
-            const push_call = (id1, id2, t1, t2) => {
-                new_calls.unshift([id2, false, false]);
-                new_calls.unshift([new ExecVisited(id1), t1, t2]);
+            // this calls the function an ExecCall points to
+            // and then calls the caller again with updated state
+            const push_call = (id1, id2, state) => {
+                new_calls.unshift(id2, EVAL_NONE);
+                new_calls.unshift(id1, state);
             }
             const deref = (id) => {
-                let r = reg[id.id];
-                while (r instanceof ExecVisited) {
-                    r = reg[r.id];
+                let r = reg.get(id.id);
+                // ExecValues can be unwrapped arbitrarily
+                // tho ExecCalls cannot
+                while (r instanceof ExecValue) {
+                    r = reg.get(r.id.id);
                 }
                 return r;
             }
-            let firstVisit = f[0] instanceof ExecVisited;
-            let secondVisit = f[1] instanceof ExecVisited
-            if (firstVisit && secondVisit) {
-                // i think this is safe?
+            let leftValued = f0[0] instanceof ExecValue;
+            let rightValued = f0[1] instanceof ExecValue;
+            let leftCall = f0[0] instanceof ExecCall;
+            let rightCall = f0[1] instanceof ExecCall;
+            // we could do a whole new call but its possible
+            // to just dereference here and move on
+            let f;
+            if (leftValued && rightValued
+                || leftCall && rightCall && eval_state == EVAL_RIGHT) {
+                //reg[id.id] = create_call(deref(f[0]), deref(f[1]));
+                f = [deref(f0[0]), deref(f0[1])];
+            } else if (leftValued || leftCall && (eval_state == EVAL_LEFT
+                || eval_state == EVAL_RIGHT)) {
+                f = [deref(f0[0]), f0[1]];
+            } else if (rightValued || rightCall && eval_state == EVAL_RIGHT) {
+                f = [f0[0], deref(f0[1])];
+            } else {
+                f = [f0[0], f0[1]];
+            }
+            if (f[0] instanceof ExecCall && f[1] instanceof ExecCall 
+                && eval_state == EVAL_RIGHT) {
+                // idk how the hell we could end up here.
+                // an ExecCall would have to end up in the register
+                // that maybe should be a fatal error
                 let val1 = deref(f[0]);
-                let val2 = deref(f[1]);
-                reg[id.id] = create_call(val1, val2, true, true);
-            } else if (f[0] instanceof ExecId) {
-                if (first || firstVisit) {
+                let val2 = deref(f[0]);
+                reg.set(id, create_call(val, f[1], EVAL_NONE));
+            } else if (f[0] instanceof ExecCall) {
+                if (eval_state == EVAL_RIGHT || eval_state == EVAL_RIGHT) {
                     let val = deref(f[0]);
-                    reg[id.id] = create_call(val, f[1], true, false);
+                    reg.set(id, create_call(val, f[1], EVAL_NONE));
                 } else {
-                    push_call(id, f[0], true, false);
+                    push_call(id, f[0].id, EVAL_LEFT);
                 }
-            } else if (f[1] instanceof ExecId) {
-                if (second || secondVisit) {
+            } else if (f[1] instanceof ExecCall) {
+                if (eval_state == EVAL_RIGHT) {
                     let val = deref(f[1]);
-                    reg[id.id] = create_call(f[0], val, true, true);
+                    reg.set(id, create_call(f[0], f[1], EVAL_RIGHT));
+                } else if (f[0] instanceof ExecDelay) {
+                    // don't execute anything
+                    reg.set(id, new ExecPromise(f[1]));
                 } else {
-                    if (f[0] instanceof ExecDelay) {
-                        reg[id.id] = new ExecPromise(f[1]);
-                    } else {
-                        push_call(id, f[1], true, true);
-                    }
+                    push_call(id, f[1].id, EVAL_RIGHT);
                 }
             } else if (f[0] instanceof ExecChar) {
-                buf.push(f[0].value);
-                reg[id.id] = f[1];
+                buf.push(f[0].value); // write character
+                reg.set(id, f[1]);
             } else if (f[0] instanceof ExecIdentity) {
-                reg[id.id] = f[1];
+                reg.set(id, f[1]);
             } else if (f[0] instanceof ExecConstant) {
-                reg[id.id] = new ExecConstant1(f[1]);
+                reg.set(id, new ExecConstant1(f[1]));
             } else if (f[0] instanceof ExecConstant1) {
-                reg[id.id] = f[0].value;
+                reg.set(id, f[0].value);
             } else if (f[0] instanceof ExecSubstitute) {
-                reg[id.id] = new ExecSubstitute1(f[1]);
+                reg.set(id, new ExecSubstitute1(f[1]));
             } else if (f[0] instanceof ExecSubstitute1) {
-                reg[id.id] = new ExecSubstitute2(f[0].x, f[1]);
+                reg.set(id, new ExecSubstitute2(f[0].x, f[1]));
             } else if (f[0] instanceof ExecSubstitute2) {
                 let id1 = create_call(f[0].x, f[1]);
                 let id2 = create_call(f[0].y, f[1]);
-                reg[id.id] = create_call(id1, id2, true, true);
+                reg.set(id, create_call(id1, id2, EVAL_RIGHT));
             } else if (f[0] instanceof ExecCallCC) {
-                let continuation = callstack.map(([a,b,c])=>[a,b,c]);
-                reg[id.id] = create_call(f[1], new ExecCC(id,continuation));
+                let continuation = callstack.clone();
+                reg.set(id, create_call(f[1], new ExecCC(id,continuation)));
             } else if (f[0] instanceof ExecCC) {
                 console.log('cc', f[0].id, ''+f[1]);
-                reg[f[0].id.id] = f[1];
-                callstack = f[0].continuation;
+                reg.set(f[0].id, f[1]);
+                callstack = f[0].continuation.clone();
             } else if (f[0] instanceof ExecDelay) {
-                reg[id.id] = f[1];
+                reg.set(id, f[1]);
             } else if (f[0] instanceof ExecPromise) {
-                reg[id.id] = new_calls.unshift([f[0].value, false, false]);
+                reg.set(id, create_call(f[0].value, f[1], EVAL_NONE));
             } else if (f[0] instanceof ExecExit) {
-                callstack = [];
+                callstack = new ExecCallStack ();
             } else {
-                throw 'Execution error: '+f[0]+" not supported.\nStack: "+callstack;
+                throw 'Execution error: '+f[0]+" not supported.\n"
+                    +"Call at p"+id+": "+f[0]+" "+f[1]+"\n"
+                    +callstack;
             }
-            callstack.push(...new_calls);
-            /*
-            k = 0
-            console.log(reg.length, id.id, this.seq.map(()=>
-                id.id == k ? '['+(reg[k++]||'<>')+']' : ''+(reg[k++]||'<>')
+            callstack.append(new_calls);
+            console.log(reg.map.size, id.id, [...this.seq.map.keys()].map((k)=>
+                id.id == k ? '['+(reg.map.get(k)||'<>')+']' : ''+(reg.map.get(k)||'<>')
             ).join(', '));
-            */
         }
     }
     toString () {
-        return this.seq.map(([a,b])=>a+' '+b).join(', ');
-    }
-}
-let UnlambdaAST = class {
-    top;
-    constructor () {
-        this.top = new UnlambdaASTTop ();
-    }
-    toString () {
-        return ''+this.top;
-    }
-    compile () {
-        return new UnlambdaExecutable (this);
-    }
-}
-let Unlambda = class {
-    parse (source) {
-        let ast = new UnlambdaAST ();
-        let node_stack = [ast.top];
-        const READ = 0;
-        const CHAR = 1;
-        const CMMT = 2;
-        let state = READ;
-        let node = UnlambdaASTNode;
-        for (let c of source) {
-            if (state == READ && c.match(/\S/)) {
-                const char_map = {
-                    '`': UnlambdaASTApply,
-                    'e': UnlambdaASTExit,
-                    's': UnlambdaASTSubstitute,
-                    'k': UnlambdaASTConstant,
-                    'i': UnlambdaASTIdentity,
-                    'v': UnlambdaASTVoid,
-                    'd': UnlambdaASTDelay,
-                    'c': UnlambdaASTCallCC,
-                };
-                let type = char_map[c];
-                if (type === undefined) {
-                    if (c == '.') {
-                        node = new UnlambdaASTChar ();
-                        state = CHAR;
-                    } else if (c == 'r') {
-                        node = new UnlambdaASTChar ();
-                        node.value = "\n";
-                    } else if (c == '#') {
-                        state = CMMT;
-                    } else {
-                        throw 'Parse error: Unrecognized character '+c+'.'
-                    }
-                } else {
-                    node = new char_map[c] ();
-                }
-                if (node !== UnlambdaASTNode) {
-                    let next = node_stack.pop().add(node);
-                    if (next !== undefined) node_stack.push(...next);
-                }
-            } else if (state == CHAR) {
-                node.value = c;
-                state = READ;
-            } else if (state == CMMT) {
-                if (c == "\n") state = READ;
-            }
-        }
-        return ast;
-    }
-    run () {
+        return this.seq+'';
     }
 }
 
 window.onload = () => {
 let parser = new Unlambda ();
 const code_pad = document.getElementById('code');
-const submit_button = document.getElementById('submit');
+const run_button = document.getElementById('run');
+const stop_button = document.getElementById('stop');
 const parse_place = document.getElementById('parse');
 const executable_place = document.getElementById('executable');
 const output_place = document.getElementById('output');
 const error_place = document.getElementById('error');
-submit_button.addEventListener('click', (e) => {
+let exec;
+run_button.addEventListener('click', (e) => {
     let code_source = code_pad.value;
     parse_place.innerText = '';
     output_place.innerText = '';
@@ -423,7 +541,7 @@ submit_button.addEventListener('click', (e) => {
     try {
         let ast = parser.parse(code_source);
         parse_place.innerText = ''+ast;
-        let exec = ast.compile();
+        exec = ast.compile();
         executable_place.innerText = ''+exec;
         let buf = new class {
             push (arg) {
@@ -432,8 +550,12 @@ submit_button.addEventListener('click', (e) => {
         }();
         exec.run(buf);
     } catch (e) {
+        console.error(e);
         error_place.innerText = ''+e;
     }
+});
+stop_button.addEventListener('click', (e) => {
+    exec.stop = true;
 });
 }
 </script>
@@ -442,10 +564,11 @@ submit_button.addEventListener('click', (e) => {
 <div class=main_container>
 <textarea id=code cols=100 rows=25></textarea>
 <span class=right>
-<input type=button value=submit id=submit /><br>
-<b>AST: </b><span id=parse></span><br>
-<b>ASM: </b><span id=executable></span><br>
-<b>Out: </b><span id=output></span><br>
+<input type=button value=run id=run
+/><input type=button value=stop id=stop /><br>
+<b>AST: </b><span id=parse></span>
+<b>ASM: </b><span id=executable></span>
+<b>Out: </b><span id=output></span>
 <b>Err: </b><span id=error></span>
 </span>
 </div>
