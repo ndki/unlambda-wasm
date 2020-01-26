@@ -141,7 +141,7 @@ const UnlambdaExecutable = class {
         return this.inits.map((init)=>this.run_s(input, output, init));
     }
     run_s (input, output, init) {
-        return this.states.clone().run(init);
+        return this.states.clone().run(input, output, init);
     }
     toString () {
         return this.states+'';
@@ -298,13 +298,24 @@ const UnlambdaASTReprint = class extends UnlambdaASTNode {
 // we compile to a state machine and each state is
 // a function application called ExecData.
 // we very frequently add states.
-// when they are no longer referenced.
 // there are only a few types of function (ExecNode):
 // one of the symbol-functions,
 // one of the character-functions,
 // the special Variable function,
 // or one of the 4 pointer-functions,
 // Literal, Call, Continuation, and Chain.
+// i believe this is subtly distinct from the canonical C and Java
+// interpreters of the language. those interpreters
+// build up an explicit tree of continuation/task objects,
+// and traverses the tree. however we make no inherent distinction
+// between continuations and tasks. a continuation just changes
+// our tape head, a "chain" changes our return path, and a "task"
+// (here a Call) changes our tape head to an expression that
+// it is dependent on, and changes our return path to an
+// evaluation on the "last return value". idk i think this is
+// different from the canonical approach but im sure.
+
+// as far as the states go,
 // we say an ExecNode "resolves" to an immediately callable function,
 // and an ExecData "resolves" by producing an ExecData
 // that is an immediately callable function.
@@ -457,9 +468,9 @@ const StateData = class {
     simple_states = [];
     substitute_states = [];
     size () {
-        return this.call_states.length + this.resolved_states.length
-            + this.chain_states.length + this.identity_states.length
-            + this.simple_states.length + this.substitute_states.length
+        return this.call_states.length/2 + this.resolved_states.length/2
+            + this.chain_states.length/2 + this.identity_states.length
+            + this.simple_states.length + this.substitute_states.length/2
     }
     clone () {
         let sd = new StateData();
@@ -476,7 +487,7 @@ const StateData = class {
         this.call_states[a.addr+1] = y;
     }
     new_call (a, b) { /// also temporary
-        return new StatePtr(StateType.Call, this.call_states.push(void 8)-1);
+        return new StatePtr(StateType.Call, this.call_states.push(void 8, void 8)-2);
     }
     add_call (x, y) {
         let i = this.call_states.push(x, y)-2;
@@ -532,26 +543,33 @@ const StateData = class {
         return new StatePtr(StateType.Substitute2, i);
     }
     get_substitute2 ({addr}) {
-        return {left: this.substitute_states[addr+1], right: this.substitute_states[addr+1]}
+        return {left: this.substitute_states[addr], right: this.substitute_states[addr+1]}
     }
     toString () {
         return [...this.states.values()].join(' ');
     }
-    run (ptr) {
+    run (input, output, ptr) {
         let variable = PointerFn.Continuation(EXIT);
         let trail = EXIT;
         let current_char = SymbolFn.Void;
         let states = this;
         let total = 0;
-        while (ptr.type != StateType.Exit && total++ < 6000) {
-            //console.log(''+ptr);
+        while (ptr.type != StateType.Exit && total++ < 600000) {
             switch (ptr.type) {
                 case StateType.Call:
                 let call = states.get_call(ptr);
+                //console.log(''+ptr+' <'+call.left+' '+call.right+'> <- '+variable);
+                if (call.left.id == FunctionId.Variable) { call.left = variable }
+                else if (call.right.id == FunctionId.Variable) { call.right = variable }
                 if (call.left.id == FunctionId.Call) {
                     // adding a chain ensures we come back to <replacement>
                     // after we resolve left.ptr
-                    let replacement = states.add_resolved(SymbolFn.Variable, call.right);
+                    let replacement;
+                    if (call.right.id == FunctionId.Call) {
+                        replacement = states.add_call(SymbolFn.Variable, call.right);
+                    } else {
+                        replacement = states.add_resolved(SymbolFn.Variable, call.right);
+                    }
                     trail = states.add_chain(replacement, trail);
                     ptr = call.left.ptr;
                 } else if (call.left.id == FunctionId.Delay) {
@@ -567,8 +585,9 @@ const StateData = class {
                 break;
                 case StateType.Resolved:
                 let rsv = states.get_resolved(ptr);
-                if (rsv.left.id == 'X') { rsv.left = variable }
-                else if (rsv.right.id == 'X') { rsv.right = variable }
+                //console.log(''+ptr+' ['+rsv.left+' '+rsv.right+'] <- '+variable);
+                if (rsv.left.id == FunctionId.Variable) { rsv.left = variable }
+                else if (rsv.right.id == FunctionId.Variable) { rsv.right = variable }
                 switch (rsv.left.id) {
                     case FunctionId.Literal:
                     switch (rsv.left.ptr.type) {
@@ -587,7 +606,7 @@ const StateData = class {
                         break;
                         case StateType.Substitute:
                         let subst = states.get_substitute(rsv.left.ptr);
-                        let z = states.add_substitute2(subst.right, rsv.right);
+                        let z = states.add_substitute2(subst, rsv.right);
                         variable = PointerFn.Literal(z);
                         ptr = trail;
                         break;
@@ -669,11 +688,14 @@ const StateData = class {
                 break;
                 case StateType.Chain:
                 let chain = states.get_chain(ptr);
-                trail = chain.left;
-                ptr = chain.right;
+                //console.log(''+ptr+' '+chain.left+' -> '+chain.right);
+                trail = chain.right;
+                ptr = chain.left;
                 break;
                 case StateType.Identity:
+                // we actually want to throw here.
                 variable = states.get_identity(ptr);
+                //console.log(''+ptr+'get '+variable);
                 ptr = trail;
                 break;
                 case StateType.Substitute2:
