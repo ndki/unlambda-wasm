@@ -9,7 +9,9 @@ export const Unlambda = class {
         let state = READ;
         let node = new UnlambdaASTNode ();
         for (let c of source) {
-            if (state == READ && c.match(/\S/)) {
+            if (state == READ && c == '#') {
+                state = CMMT;
+            } else if (state == READ && c.match(/\S/)) {
                 const char_map = {
                     '`': UnlambdaASTApply,
                     'e': UnlambdaASTExit,
@@ -33,8 +35,6 @@ export const Unlambda = class {
                     } else if (c == '?') {
                         node = new UnlambdaASTCompare ();
                         state = CHAR;
-                    } else if (c == '#') {
-                        state = CMMT;
                     } else {
                         throw 'Parse error: Unrecognized character '+c+'.'
                     }
