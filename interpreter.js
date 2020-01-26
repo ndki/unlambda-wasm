@@ -114,6 +114,7 @@ export const Unlambda = class {
 // other implementations.
 const StateType = {
     Exit: 'E',
+    Void: 'V',
     CallLeft: 'U',
     CallRight: 'V',
     CallBoth: 'W',
@@ -178,11 +179,18 @@ const PtrFn = class extends FnNode {
         this.type = type;
         this.addr = addr;
     }
+    eval_needed () {
+        return this.type == StateType.CallLeft
+            || this.type == StateType.CallRight
+            || this.type == StateType.CallBoth
+            || this.type == StateType.Resolved;
+    }
     toString () {
         return 'P['+this.type+this.addr+']'
     }
 }
 const EXIT = new PtrFn(StateType.Exit,0);
+const VOID = new PtrFn(StateType.Void,0);
 
 const State = class {
     left; right;
@@ -196,13 +204,12 @@ const StateData = class {
     chain_states = [];
     call_states = [];
     resolved_states = [];
-    identity_states = [];
     simple_states = [];
     substitute_states = [];
     application_cache = new Map();
     size () {
         return this.call_states.length/2 + this.resolved_states.length/2
-            + this.chain_states.length/2 + this.identity_states.length
+            + this.chain_states.length/2
             + this.simple_states.length + this.substitute_states.length/2
     }
     clone () {
@@ -210,7 +217,6 @@ const StateData = class {
         sd.call_states = this.call_states;
         sd.resolved_states = this.resolved_states;
         sd.chain_states = this.chain_states;
-        sd.identity_states = this.identity_states;
         sd.simple_states = this.simple_states;
         sd.substitute_states = this.substitute_states;
         return sd;
@@ -223,16 +229,38 @@ const StateData = class {
         }
         let ptr = cache.get(y);
         if (ptr) {
-        } else if (x.id == FunctionId.Pointer) {
-            if (y.id == FunctionId.Pointer) {
+        } else if (x.id == FunctionId.Pointer && x.eval_needed()) {
+            if (y.id == FunctionId.Pointer && y.eval_needed()) {
                 ptr = this.add_call_both(x, y);
             } else {
                 ptr = this.add_call_left(x, y);
             }
-        } else if (y.id == FunctionId.Pointer) {
+        } else if (x.id != FunctionId.Delay && y.id == FunctionId.Pointer
+            && y.eval_needed()) {
             ptr = this.add_call_right(x, y);
         } else {
-            ptr = this.add_resolved(x, y);
+            // if an application is "side-effect free"ish,
+            // and has no pointers, we can (and should) already set up
+            // the 'evaluated' state instead of resolving it at runtime
+            switch (x.id) {
+                case FunctionId.Identity:
+                ptr = this.add_identity(y);
+                break;
+                case FunctionId.Delay:
+                ptr = this.add_promise(y);
+                break;
+                case FunctionId.Constant:
+                ptr = this.add_constant(y);
+                break;
+                case FunctionId.Substitute:
+                ptr = this.add_substitute(y);
+                break;
+                case FunctionId.Void:
+                ptr = VOID;
+                break;
+                default:
+                ptr = this.add_resolved(x, y);
+            }
         }
         cache.set(y, ptr);
         return ptr;
@@ -305,7 +333,6 @@ const StateData = class {
         return '&:' + this.chain_states + "\n"+
             'C:' + this.call_states + "\n"+
             'R:' + this.resolved_states + "\n"+
-            'I:' + this.identity_states + "\n"+
             'S:' + this.simple_states + "\n"+
             'Z:' + this.substitute_states + "\n";
     }
@@ -448,6 +475,10 @@ const StateMachine = class {
                         this.variable = rsv.right;
                         this.ptr = rsv.left;
                         break;
+                        case StateType.Void:
+                        this.variable = SymbolFn.Void;
+                        this.ptr = this.trail;
+                        break;
                         case StateType.Resolved:
                         throw 'Cannot resolve '+rsv.left+' because we cannot double resolved.';
                         break;
@@ -469,6 +500,7 @@ const StateMachine = class {
                 this.trail = chain.right;
                 this.ptr = chain.left;
                 break;
+                case StateType.Void:
                 case StateType.Identity:
                 case StateType.Substitute2:
                 case StateType.Constant:
