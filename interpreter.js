@@ -1,346 +1,123 @@
-'use strict;'
+// here's an interpreter for Unlambda!
+// call Unlambda.parse(<string>) to make a state machine,
+// and then call .run() on that to execute it!
 export const Unlambda = class {
     parse (source) {
-        let ast = new UnlambdaAST ();
-        let node_stack = [ast.top];
+        let states = new StateData ();
+        let last_fn_ptr;
+        let lefts = [];
+        let left_completed = [];
+        let char_fn;
+        let char_result = void 8;
+        let print_cache = new Map ();
+        let compare_cache = new Map ();
         const READ = 0;
         const CHAR = 1;
         const CMMT = 2;
         let state = READ;
-        let node = new UnlambdaASTNode ();
         for (let c of source) {
             if (state == READ && c == '#') {
                 state = CMMT;
-            } else if (state == READ && c.match(/\S/)) {
-                const char_map = {
-                    '`': UnlambdaASTApply,
-                    'e': UnlambdaASTExit,
-                    's': UnlambdaASTSubstitute,
-                    'k': UnlambdaASTConstant,
-                    'i': UnlambdaASTIdentity,
-                    'v': UnlambdaASTVoid,
-                    'd': UnlambdaASTDelay,
-                    'c': UnlambdaASTCallCC,
-                    '@': UnlambdaASTRead,
-                    '|': UnlambdaASTReprint,
-                };
-                let type = char_map[c];
-                if (type === undefined) {
-                    if (c == '.') {
-                        node = new UnlambdaASTChar ();
-                        state = CHAR;
-                    } else if (c == 'r') {
-                        node = new UnlambdaASTChar ();
-                        node.value = "\n";
-                    } else if (c == '?') {
-                        node = new UnlambdaASTCompare ();
-                        state = CHAR;
-                    } else {
-                        throw 'Parse error: Unrecognized character '+c+'.'
+            } else {
+                switch (state) {
+                    case CMMT:
+                    if (c == "\n") state = READ;
+                    break;
+                    case CHAR:
+                    let cache = char_fn == FunctionId.Print ?
+                        print_cache : compare_cache;
+                    char_result = cache.get(c);
+                    if (!char_result) {
+                        char_result = new CharFnNode(char_fn, c);
+                        cache.set(c, char_result);
                     }
-                } else {
-                    node = new char_map[c] ();
-                }
-                if (node.id != '!') {
-                    let next = node_stack.pop().add(node);
-                    if (next !== undefined) node_stack.push(...next);
-                }
-            } else if (state == CHAR) {
-                node.value = c;
-                state = READ;
-            } else if (state == CMMT) {
-                if (c == "\n") state = READ;
-            }
-        }
-        return ast;
-    }
-}
-
-export const UnlambdaCompiler = class {
-    states;
-    inits;
-    constructor (ast) {
-        this.compile(ast);
-    }
-    compile (ast) {
-        this.states = new StateData ();
-        this.inits = [];
-        for (let node of ast.top.list) {
-            if (node instanceof UnlambdaASTApply) {
-                this.inits.push(this.compile_node(node));
-            }
-        }
-    }
-    compile_node (node) {
-        let ptr = this.states.new_call();
-        let init = void 8;
-        let node_stack = [[node, ptr, void 8, void 8]];
-        let left_ptr; let right_ptr;
-        while (node_stack.length > 0) {
-            [node, ptr, left_ptr, right_ptr] = node_stack.pop();
-            let left_valid = node.left.id != '!';
-            let right_valid = node.right.id != '!';
-            let left_apply = node.left.id == '`';
-            let right_apply = node.right.id == '`';
-            if (!init && left_valid && right_valid) {
-                init = ptr;
-            }
-            if (left_apply && left_ptr === undefined){
-                let next_i = this.states.new_call();
-                node_stack.push([node, ptr, next_i, void 8]);
-                node_stack.push([node.left, next_i, void 8, void 8]);
-                node = node.left;
-            } else if (right_apply && right_ptr === undefined){
-                let next_i = this.states.new_call();
-                node_stack.push([node, ptr, left_ptr, next_i]);
-                node_stack.push([node.right, next_i, void 8, void 8]);
-                node = node.right;
-            } else if (left_valid && right_valid) {
-                let convert = (node, ptr) => {
-                    if (node.id == '`') {
-                        if (node.left.id == '!'|| node.right === '!') {
-                            throw 'Application has too few arguments.'
+                    state = READ;
+                    // continue
+                    case READ:
+                    if (char_result || c.match(/\S/)) {
+                        if (left_completed.length == 0 && lefts.length) {
+                            throw 'Parse error: Unexpected character "'+c+'" after end of program.'+"\n"
+                                + 'Are you missing a function application at the beginning?';
                         }
-                        return PointerFn.Call(ptr)
-                    } else {
-                        let ec = AST2Exec[node.id];
-                        if (node.id == '.' || node.id == '?') {
-                            return ec(node.value);
-                        } else if (node.id == 'e') {
-                            return ec(EXIT);
+                        if (c == '`') {
+                            // defer until we know what we're doing
+                            left_completed.push(false);
+                        } else if (c == '.') {
+                            char_fn = FunctionId.Print;
+                            state = CHAR;
+                        } else if (c == '?') {
+                            char_fn = FunctionId.Compare;
+                            state = CHAR;
                         } else {
-                            return ec;
+                            let fn;
+                            if (char_result !== undefined) {
+                                fn = char_result;
+                                char_result = void 8;
+                            } else if ((fn = char2fn[c]) === undefined) {
+                                throw 'Parse error: Unrecognized character '+c+'.'
+                            }
+                            if (left_completed.length == 0) {
+                                // program is just a single function, apparently
+                                let last_rhs = states.add_resolved(SymbolFn.Identity, fn);
+                                lefts.push(last_rhs);
+                                last_fn_ptr = last_rhs;
+                            } else if (left_completed[left_completed.length-1]) {
+                                // complete function application using left and right! :)
+                                // then we also need to clean up those functions that were
+                                // waiting on a right-hand side.
+                                let last_rhs = fn;
+                                while (left_completed[left_completed.length-1]) {
+                                    left_completed.pop();
+                                    last_rhs = states.add_application(lefts.pop(), last_rhs)
+                                }
+                                lefts.push(last_rhs);
+                                left_completed[left_completed.length-1] = true;
+                                last_fn_ptr = last_rhs;
+                            } else {
+                                // defer until we get rhs
+                                lefts.push(fn);
+                                left_completed[left_completed.length-1] = true;
+                            }
                         }
                     }
                 }
-                let left_v = convert(node.left, left_ptr);
-                let right_v = convert(node.right, right_ptr);
-                this.states.set(ptr, left_v, right_v);
             }
         }
-        return init;
+        console.log(''+states);
+        let state_machine = new StateMachine (states, last_fn_ptr);
+        return state_machine;
     }
-    run (input, output) {
-        this.inits.map((init)=>this.run_s(input, output, init));
-    }
-    run_s (input, output, init) {
-        this.state_machine = new StateMachine(this.states.clone(), init);
-        this.state_machine.run(input, output);
-    }
-    exit () {
-        this.state_machine.exit = true;
-    }
-    toString () {
-        return this.states+'';
-    }
-}
-const UnlambdaAST = class {
-    top;
-    constructor () {
-        this.top = new UnlambdaASTTop ();
-    }
-    toString () {
-        return ''+this.top;
-    }
-    compile () {
-        return new UnlambdaCompiler (this);
-    }
-}
-const UnlambdaASTNode = class {
-    get name () { return 'empty' }
-    get data () { return false }
-    get id () { return '!' }
-    static toString () {
-        return '[empty]';
-    }
-    toString () {
-        return '['+this.name+']';
-    }
-}
-const UnlambdaASTTop = class {
-    get name () { return 'top' }
-    get data () { return true }
-    list = [];
-    add (node) {
-        this.list.push(node);
-        if (node.data) {
-            return [this, node];
-        } else {
-            return [this];
-        }
-    }
-    toString () {
-        return 'AST(' + this.list.join(', ') + ')';
-    }
-}
-const UnlambdaASTApply = class extends UnlambdaASTNode {
-    get name () { return 'apply' }
-    get data () { return true }
-    get id () { return '`' }
-    left = new UnlambdaASTNode ();
-    right = new UnlambdaASTNode ();
-    add (node) {
-        if (this.left.id == '!') {
-            this.left = node;
-            if (node.data) {
-                return [this, node];
-            } else {
-                return [this];
-            }
-        } else if (this.right.id == '!') {
-            this.right = node;
-            if (node.data) {
-                return [node];
-            } else {
-                return [];
-            }
-        } else {
-            throw 'Internal parser error: Full apply added to.';
-        }
-    }
-    toString () {
-        //return '`(' + this.left + ' ' + this.right + ')';
-        let str = '`(';
-        let rights = ['', this.right];
-        let v = this.left;
-        while (rights.length > 0) {
-            if (v.id == '`') {
-                str += '`('
-                if (v.left.id == '`') {
-                    rights.push(v.right);
-                    v = v.left;
-                } else {
-                    str += v.left + ', ';
-                    if (v.right.id == '`') {
-                        rights.push('');
-                        v = v.right;
-                    } else {
-                        str += v.right + ')';
-                        v = rights.pop();
-                    }
-                }
-            } else {
-                str += ', '+v+')';
-                v = rights.pop();
-            }
-        }
-        str += ')';
-        return str;
-    }
-}
-const UnlambdaASTConstant = class extends UnlambdaASTNode {
-    get name () { return 'const' }
-    get id () { return 'k' }
-}
-const UnlambdaASTSubstitute = class extends UnlambdaASTNode {
-    get name () { return 'sub' }
-    get id () { return 's' }
-}
-const UnlambdaASTIdentity = class extends UnlambdaASTNode {
-    get name () { return 'id' }
-    get id () { return 'i' }
-}
-const UnlambdaASTVoid = class extends UnlambdaASTNode {
-    get name () { return 'void' }
-    get id () { return 'v' }
-}
-const UnlambdaASTCallCC = class extends UnlambdaASTNode {
-    get name () { return 'call/cc' }
-    get id () { return 'c' }
-}
-const UnlambdaASTDelay = class extends UnlambdaASTNode {
-    get name () { return 'delay' }
-    get id () { return 'd' }
-}
-const UnlambdaASTExit = class extends UnlambdaASTNode {
-    get name () { return 'exit' }
-    get id () { return 'e' }
-}
-const UnlambdaASTChar = class extends UnlambdaASTNode {
-    get name () { return 'char' }
-    get id () { return '.' }
-    value = '';
-    toString () {
-        return '[char ' + this.value + ']';
-    }
-}
-const UnlambdaASTRead = class extends UnlambdaASTNode {
-    get name () { return 'read' }
-    get id () { return '@' }
-}
-const UnlambdaASTCompare = class extends UnlambdaASTNode {
-    get name () { return 'cmp' }
-    get id () { return '?' }
-    value = '';
-    toString () {
-        return '[cmp ' + this.value + ']';
-    }
-}
-const UnlambdaASTReprint = class extends UnlambdaASTNode {
-    get name () { return 'reprint' }
-    get id () { return '|' }
 }
 
-// okay here's where its less obvious whats going on...
-// we compile to a state machine and each state is
-// a function application called ExecData.
-// we very frequently add states.
-// there are only a few types of function (ExecNode):
-// one of the symbol-functions,
-// one of the character-functions,
-// the special Variable function,
-// or one of the 4 pointer-functions,
-// Literal, Call, Continuation, and Chain.
-// i believe this is subtly distinct from the canonical C and Java
-// interpreters of the language. those interpreters
-// build up an explicit tree of continuation/task objects,
-// and traverses the tree. however we make no inherent distinction
-// between continuations and tasks. a continuation just changes
-// our tape head, a "chain" changes our return path, and a "task"
-// (here a Call) changes our tape head to an expression that
-// it is dependent on, and changes our return path to an
-// evaluation on the "last return value". idk i think this is
-// different from the canonical approach but im sure.
-
-// as far as the states go,
-// we say an ExecNode "resolves" to an immediately callable function,
-// and an ExecData "resolves" by producing an ExecData
-// that is an immediately callable function.
-// a Call pointer-function cannot be resolved, that is,
-// we define an ExecData to be unresolved if contains a Call,
-// unless it is some `dP, where P is an Call.
-// however, an unresolved Data will be used to generate resolved Data
-// using the other 4 functions.
+// we compile to a state machine...  we very frequently add states.
+// each state represents some function application,
+// although a Chain state implicitly represents the application of
+// <`NQ>, where Q is a normal continuation, and N is function that
+// calls that continuation, but with a given chain of continuations
+// (in other words, it represents a node of the callstack).
+// there are only a few types of function:
+// one of the symbol-functions, one of the character-functions,
+// the special Variable function, and the special Pointer function.
 // the Variable special function resolves to the value of 
 // the last function application. it is the access point for
 // our single internal variable other than "current character".
-// however, this variable never stores anything other than
-// the pointer to some valued ExecData.
-// a Literal pointer-function resolves to its target.
-// that is, its value is the resolved ExecData that it pointer addresses.
-// although a function with Literals is resolved, the resulting value
-// may have to be generated as an additional state.
-// an Continuation pointer-function encodes a continuation.
-// a continuation is identity-valued but causes the state machine
-// to move to a particular state.
-// an Chain pointer-function encodes the callstack. it calls
-// its argument on the ExecVariable, and then calls a continuation
-// on that result, as long as its argument isn't Exit.
-// Exit is actually just any continuation that addresses
-// the special state, `eX (exit with current value).
-// this is all in theory. in actuality, some of the possible states
-// do not represent valid Unlambda programs, or a valid sequence
-// of calculations, so they are considered errors.
-// If any of these non-valid states are found by the state machine,
-// the resulting execution is considered to be undefined behavior.
+// the Pointer special function is typed. so a Pointer to a Constant
+// state is a Constant Pointer. more importantly, a Pointer to
+// Exit or Chain is a continuation, a Pointer to Call_ is an unresolved
+// function application and thus has no known value, and a Pointer to
+// anything else has the normal value of whatever it refers to as a function.
+// as far as the states go,
+// ............................... hm, i might explain that later.
 // Note: it seems really weird to me that "current character" is
 // a "global" variable. i feel like reseting the callstack should
 // also reset the "current character" value. but we follow the
 // other implementations.
 const StateType = {
     Exit: 'E',
-    Call: 'C',
-    Resolved: 'O',
+    CallLeft: 'U',
+    CallRight: 'V',
+    CallBoth: 'W',
+    Resolved: 'R',
     Chain: '&',
     Identity: 'I',
     Constant: 'K',
@@ -359,83 +136,53 @@ const FunctionId = {
     CallCC: 'c',
     Read: '@',
     Reprint: '|',
-    Literal: 'V',
-    Call: 'P',
-    Continuation: 'Q',
-    Chain: 'N',
+    Pointer: 'P',
     Print: '.',
     Compare: '?',
 }
 
-const ExecNode = class {
+const FnNode = class {
     constructor (id = FunctionId.Unknown) { this.id = id }
     toString () { return this.id }
 }
 const SymbolFn = {
-    Variable: new ExecNode(FunctionId.Variable),
-    Identity: new ExecNode(FunctionId.Identity),
-    Void: new ExecNode(FunctionId.Void),
-    Delay: new ExecNode(FunctionId.Delay),
-    Constant: new ExecNode(FunctionId.Constant),
-    Substitute: new ExecNode(FunctionId.Substitute),
-    CallCC: new ExecNode(FunctionId.CallCC),
-    Read: new ExecNode(FunctionId.Read),
-    Reprint: new ExecNode(FunctionId.Reprint),
+    Variable: new FnNode(FunctionId.Variable),
+    Identity: new FnNode(FunctionId.Identity),
+    Void: new FnNode(FunctionId.Void),
+    Delay: new FnNode(FunctionId.Delay),
+    Constant: new FnNode(FunctionId.Constant),
+    Substitute: new FnNode(FunctionId.Substitute),
+    CallCC: new FnNode(FunctionId.CallCC),
+    Read: new FnNode(FunctionId.Read),
+    Reprint: new FnNode(FunctionId.Reprint),
 }
-// our storage system StateData is typed,
-// so our pointers are typed as well.
-const StatePtr = class {
+const CharFnNode = class extends FnNode {
+    constructor (id, value) { super(id); this.value = value }
+    toString () { return this.id+this.value }
+}
+const char2fn = {
+    i: SymbolFn.Identity,
+    v: SymbolFn.Void,
+    d: SymbolFn.Delay,
+    k: SymbolFn.Constant,
+    s: SymbolFn.Substitute,
+    c: SymbolFn.CallCC,
+    r: new CharFnNode(FunctionId.Print, "\n"),
+    '@': SymbolFn.Read,
+    '|': SymbolFn.Reprint,
+}
+const PtrFn = class extends FnNode {
     type; addr;
     constructor (type, addr) {
+        super(FunctionId.Pointer);
         this.type = type;
         this.addr = addr;
     }
     toString () {
-        return '['+this.type+this.addr+']'
+        return 'P['+this.type+this.addr+']'
     }
 }
-const EXIT = new StatePtr(StateType.Exit,0);
-const ExecPtrNode = class extends ExecNode {
-    ptr; is_exit;
-    constructor (id, ptr) {
-        super(id);
-        this.ptr = ptr;
-        this.is_exit = ptr.id == EXIT;
-    }
-    toString () { return this.id + this.ptr.toString() }
-}
-const PointerFnBase = function (id) {
-    return (ptr) => {
-        return new ExecPtrNode(id, ptr)
-    }
-}
-const PointerFn = {
-    Literal: PointerFnBase(FunctionId.Literal),
-    Call: PointerFnBase(FunctionId.Call),
-    Continuation: PointerFnBase(FunctionId.Continuation),
-    Chain: PointerFnBase(FunctionId.Chain),
-}
-const ExecChar = class extends ExecNode {
-    constructor (id, value) { super(id); this.value = value }
-    toString () { return "'"+this.value+"'" }
-}
-const CharFn = {
-    Print: (value) => new ExecChar(FunctionId.Print,value),
-    Compare: (value) => new ExecChar(FunctionId.Compare,value),
-}
-const AST2Exec = {
-    'k': SymbolFn.Constant,
-    'i': SymbolFn.Identity,
-    'v': SymbolFn.Void,
-    'd': SymbolFn.Delay,
-    'c': SymbolFn.CallCC,
-    's': SymbolFn.Substitute,
-    '@': SymbolFn.Read,
-    '|': SymbolFn.Reprint,
-    'e': PointerFn.Continuation,
-    '.': CharFn.Print,
-    '?': CharFn.Compare,
-};
+const EXIT = new PtrFn(StateType.Exit,0);
 
 const State = class {
     left; right;
@@ -446,14 +193,13 @@ const State = class {
 }
 
 const StateData = class {
+    chain_states = [];
     call_states = [];
     resolved_states = [];
-    // note: in chain_states we only store pointers
-    // since we always know the structure
-    chain_states = [];
     identity_states = [];
     simple_states = [];
     substitute_states = [];
+    application_cache = new Map();
     size () {
         return this.call_states.length/2 + this.resolved_states.length/2
             + this.chain_states.length/2 + this.identity_states.length
@@ -469,37 +215,60 @@ const StateData = class {
         sd.substitute_states = this.substitute_states;
         return sd;
     }
-    set (a, x, y) { /// hopefully going away soon
-        this.call_states[a.addr] = x;
-        this.call_states[a.addr+1] = y;
+    add_application (x, y) {
+        let cache = this.application_cache.get(x);
+        if (!cache) {
+            cache = new Map ();
+            this.application_cache.set(x, cache);
+        }
+        let ptr = cache.get(y);
+        if (ptr) {
+        } else if (x.id == FunctionId.Pointer) {
+            if (y.id == FunctionId.Pointer) {
+                ptr = this.add_call_both(x, y);
+            } else {
+                ptr = this.add_call_left(x, y);
+            }
+        } else if (y.id == FunctionId.Pointer) {
+            ptr = this.add_call_right(x, y);
+        } else {
+            ptr = this.add_resolved(x, y);
+        }
+        cache.set(y, ptr);
+        return ptr;
     }
-    new_call (a, b) { /// also temporary
-        return new StatePtr(StateType.Call, this.call_states.push(void 8, void 8)-2);
-    }
-    add_call (x, y) {
+    add_call_left (x, y) {
         let i = this.call_states.push(x, y)-2;
-        return new StatePtr(StateType.Call, i);
+        return new PtrFn(StateType.CallLeft, i);
+    }
+    add_call_right (x, y) {
+        let i = this.call_states.push(x, y)-2;
+        return new PtrFn(StateType.CallRight, i);
+    }
+    add_call_both (x, y) {
+        let i = this.call_states.push(x, y)-2;
+        return new PtrFn(StateType.CallBoth, i);
     }
     get_call ({addr}) {
         return {left: this.call_states[addr], right: this.call_states[addr+1]}
     }
     add_chain (x, y) {
         let i = this.chain_states.push(x, y)-2;
-        return new StatePtr(StateType.Chain, i);
+        return new PtrFn(StateType.Chain, i);
     }
     get_chain ({addr}) {
         return {left: this.chain_states[addr], right: this.chain_states[addr+1]}
     }
     add_resolved (x, y) {
         let i = this.resolved_states.push(x, y)-2;
-        return new StatePtr(StateType.Resolved, i);
+        return new PtrFn(StateType.Resolved, i);
     }
     get_resolved ({addr}) {
         return {left: this.resolved_states[addr], right: this.resolved_states[addr+1]}
     }
     add_simple (t, x) {
         let i = this.simple_states.push(x)-1;
-        return new StatePtr(t, i)
+        return new PtrFn(t, i)
     }
     add_constant (x) {
         return this.add_simple(StateType.Constant, x);
@@ -527,56 +296,64 @@ const StateData = class {
     }
     add_substitute2 (x, y) {
         let i = this.substitute_states.push(x, y)-2;
-        return new StatePtr(StateType.Substitute2, i);
+        return new PtrFn(StateType.Substitute2, i);
     }
     get_substitute2 ({addr}) {
         return {left: this.substitute_states[addr], right: this.substitute_states[addr+1]}
     }
     toString () {
-        return [...this.states.values()].join(' ');
+        return '&:' + this.chain_states + "\n"+
+            'C:' + this.call_states + "\n"+
+            'R:' + this.resolved_states + "\n"+
+            'I:' + this.identity_states + "\n"+
+            'S:' + this.simple_states + "\n"+
+            'Z:' + this.substitute_states + "\n";
     }
 }
 
 const StateMachine = class {
-    variable = PointerFn.Continuation(EXIT);
+    variable = EXIT;
     current_char = SymbolFn.Void;
     trail = EXIT;
     ptr; states;
     exit = false;
+    steps = 0;
     constructor (states, init) {
         this.states = states;
         this.ptr = init;
     }
     run (input, output) {
+        this.exit = false;
         let states = this.states;
         while (this.ptr.type != StateType.Exit && !this.exit) {
+            this.steps++;
             switch (this.ptr.type) {
-                case StateType.Call:
-                let call = states.get_call(this.ptr);
                 //console.log(''+this.ptr+' <'+call.left+' '+call.right+'> <- '+this.variable);
-                if (call.left.id == FunctionId.Variable) { call.left = this.variable }
-                else if (call.right.id == FunctionId.Variable) { call.right = this.variable }
-                if (call.left.id == FunctionId.Call) {
-                    // adding a chain ensures we come back to <replacement>
-                    // after we resolve left.ptr
-                    let replacement;
-                    if (call.right.id == FunctionId.Call) {
-                        replacement = states.add_call(SymbolFn.Variable, call.right);
-                    } else {
-                        replacement = states.add_resolved(SymbolFn.Variable, call.right);
-                    }
-                    this.trail = states.add_chain(replacement, this.trail);
-                    this.ptr = call.left.ptr;
-                } else if (call.left.id == FunctionId.Delay) {
-                    this.variable = PointerFn.Literal(states.add_promise(call.right));
+                case StateType.CallLeft:
+                let call_left = states.get_call(this.ptr);
+                this.ptr = call_left.left;
+                // adding a chain ensures we come back to <replacement> after we resolve call.left
+                let left_replacement= states.add_resolved(SymbolFn.Variable, call_left.right);
+                this.trail = states.add_chain(left_replacement, this.trail);
+                break;
+                case StateType.CallRight:
+                let call_right = states.get_call(this.ptr);
+                let call_rl = call_right.left;
+                if (call_rl.id == FunctionId.Variable) { call_rl = this.variable }
+                if (call_rl.id == FunctionId.Delay) {
+                    this.variable = states.add_promise(call_right.right);
                     this.ptr = this.trail;
-                } else if (call.right.id == FunctionId.Call) {
-                    let replacement = states.add_resolved(call.left, SymbolFn.Variable);
-                    this.trail = states.add_chain(replacement, this.trail);
-                    this.ptr = call.right.ptr;
                 } else {
-                    this.ptr = states.add_resolved(call.left, call.right);
+                    this.ptr = call_right.right;
+                    let right_replacement = states.add_resolved(call_rl, SymbolFn.Variable);
+                    this.trail = states.add_chain(right_replacement, this.trail);
                 }
+                break;
+                case StateType.CallBoth:
+                let call_both = states.get_call(this.ptr);
+                this.ptr = call_both.left;
+                let replacement = states.add_call_right(SymbolFn.Variable, call_both.right);
+                this.trail = states.add_chain(replacement, this.trail);
                 break;
                 case StateType.Resolved:
                 let rsv = states.get_resolved(this.ptr);
@@ -600,20 +377,16 @@ const StateMachine = class {
                     this.variable = rsv.right;
                     this.ptr = this.trail;
                     break;
-                    case FunctionId.Continuation:
-                    this.variable = rsv.right;
-                    this.ptr = rsv.left.ptr;
-                    break;
                     case FunctionId.CallCC:
-                    let continuation = PointerFn.Continuation(this.trail);
+                    let continuation = this.trail;
                     this.ptr = states.add_resolved(rsv.right, continuation);
                     break;
                     case FunctionId.Constant:
-                    this.variable = PointerFn.Literal(states.add_constant(rsv.right));
+                    this.variable = states.add_constant(rsv.right);
                     this.ptr = this.trail;
                     break;
                     case FunctionId.Substitute:
-                    this.variable = PointerFn.Literal(states.add_substitute(rsv.right));
+                    this.variable = states.add_substitute(rsv.right);
                     this.ptr = this.trail;
                     break;
                     case FunctionId.Read:
@@ -641,45 +414,49 @@ const StateMachine = class {
                     this.ptr = states.add_resolved(rsv.right, this.current_char);
                     break;
                     // our function is the result of some resolved function
-                    case FunctionId.Literal:
-                    switch (rsv.left.ptr.type) {
+                    case FunctionId.Pointer:
+                    switch (rsv.left.type) {
                         case StateType.Identity:
-                        let value = states.get_identity(rsv.left.ptr);
+                        let value = states.get_identity(rsv.left);
                         this.ptr = states.add_resolved(value, rsv.right);
                         break;
                         case StateType.Promise:
-                        let promise = states.get_promise(rsv.left.ptr);
-                        this.ptr = states.add_call(promise, rsv.right);
+                        let promise = states.get_promise(rsv.left);
+                        this.ptr = states.add_call_left(promise, rsv.right);
                         break;
                         case StateType.Constant:
-                        let constant = states.get_constant(rsv.left.ptr);
+                        let constant = states.get_constant(rsv.left);
                         this.variable = constant;
                         this.ptr = this.trail;
                         break;
                         case StateType.Substitute:
-                        let subst = states.get_substitute(rsv.left.ptr);
+                        let subst = states.get_substitute(rsv.left);
                         let z = states.add_substitute2(subst, rsv.right);
-                        this.variable = PointerFn.Literal(z);
+                        this.variable = z;
                         this.ptr = this.trail;
                         break;
                         case StateType.Substitute2:
-                        let subst2 = states.get_substitute2(rsv.left.ptr);
+                        let subst2 = states.get_substitute2(rsv.left);
                         let left_ptr = states.add_resolved(subst2.left, rsv.right);
                         let right_ptr = states.add_resolved(subst2.right, rsv.right);
-                        let left_fn = PointerFn.Call(left_ptr);
-                        let right_fn = PointerFn.Call(right_ptr);
-                        let replacement = states.add_call(left_fn, right_fn);
+                        let left_fn = left_ptr;
+                        let right_fn = right_ptr;
+                        let replacement = states.add_call_both(left_fn, right_fn);
                         this.ptr = replacement;
                         break;
-                        case StateType.Resolved:
-                        throw 'Cannot double resolve.';
-                        break;
-                        case StateType.Call:
-                        throw 'A Call cannot be resolved.';
                         case StateType.Chain:
-                        throw 'A Chain should not be referenced.'
+                        this.variable = rsv.right;
+                        this.ptr = rsv.left;
+                        break;
+                        case StateType.Resolved:
+                        throw 'Cannot resolve '+rsv.left+' because we cannot double resolved.';
+                        break;
+                        case StateType.CallLeft:
+                        case StateType.CallRight:
+                        case StateType.CallBoth:
+                        throw 'Cannot resolve '+rsv.left+' because Calls cannot be resolved.';
                         default:
-                        throw "Unknown state type in "+left.ptr;
+                        throw "Unknown state type in "+rsv.left;
                     }
                     break;
                     default:
@@ -697,10 +474,10 @@ const StateMachine = class {
                 case StateType.Constant:
                 case StateType.Substitute:
                 case StateType.Promise:
-                throw "The state "+ptr.type+" cannot be evaluated.";
+                throw "The state "+this.ptr.type+" cannot be evaluated.";
                 break;
                 default:
-                throw "Unknown state type in "+ptr;
+                throw "Unknown state type " + this.ptr.type + " in "+this.ptr;
             }
         }
         if (this.ptr.type == StateType.Exit) {

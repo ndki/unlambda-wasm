@@ -36,7 +36,6 @@ const input_place = document.getElementById('input');
 const eof_place = document.getElementById('eof');
 const status_place = document.getElementById('status');
 const parse_place = document.getElementById('parse');
-const executable_place = document.getElementById('executable');
 const output_place = document.getElementById('output');
 const error_place = document.getElementById('error');
 run_button.addEventListener('click', (e) => {
@@ -51,27 +50,23 @@ run_button.addEventListener('click', (e) => {
         let p_t = Date.now();
         ast = parser.parse(code_source);
         //parse_place.innerText = ''+ast;
-        parse_place.innerText = 'Parsed in '+(Date.now()-p_t)/1000+'s.';
+        parse_place.innerText = 'Parsed in '+(Date.now()-p_t)/1000+'s. Size of state data: '+ast.states.size();
     } catch (e) {
         parse_place.innerText = 'Parse failed.';
         error_place.innerText = ''+e;
         console.error(e);
     }
     if (ast) {
-        status_place.innerText = 'Compiling.. ';
-        let c_t = Date.now();
-        let exec = ast.compile();
-        //executable_place.innerText = ''+exec;
-        executable_place.innerText = 'Compiled in '+(Date.now()-c_t)/1000+'s'
-            + ' to size ' + exec.states.size()+'.';
-        stop_button.addEventListener('click', (e) => { exec.stop() });
+        stop_button.addEventListener('click', (e) => { ast.exit = true });
         let r_t;
         let output = new class {
             push (arg) {
                 output_place.append(arg);
             }
             done () {
-                status_place.innerText = 'Done. Elapsed time: '+(Date.now()-r_t)/1000+'s. ';
+                status_place.innerText = 'Done. Current size: '+ast.states.size()+'. '
+                    + 'Elapsed time: '+(Date.now()-r_t)/1000+'s. '
+                    + 'Elapsed steps '+ast.steps+'.';
             }
         }();
         let input = new class {
@@ -96,7 +91,8 @@ run_button.addEventListener('click', (e) => {
                 let paused_time = Date.now();
                 status_place.innerText = 'Current size: '+state_machine.states.size()+'. '
                     + 'Elapsed time: '+(Date.now()-r_t)/1000 +'s. '
-                    + 'Pending input. ';
+                    + 'Elapsed steps '+ast.steps+'. '
+                    + 'Pending input.';
                 let check_input = (e) => {
                     if (input_place.value) {
                         input_place.removeEventListener('input', check_input);
@@ -110,7 +106,6 @@ run_button.addEventListener('click', (e) => {
                     input_place.removeEventListener('input', check_input);
                     eof_place.removeEventListener('click', set_eof);
                     this.eof = true;
-                    state_machine.exit = false;
                     r_t += Date.now() - paused_time;
                     state_machine.run(input, output);
                 }
@@ -120,8 +115,7 @@ run_button.addEventListener('click', (e) => {
         }();
         status_place.append('Running.. ');
         r_t = Date.now();
-        //let results = exec.run(input, output);
-        exec.run(input, output);
+        ast.run(input, output);
     }
 });
 }
@@ -129,14 +123,13 @@ run_button.addEventListener('click', (e) => {
 </head>
 <body>
 <div class=main_container>
-<textarea id=code cols=80 rows=25 spellcheck=false wrap=off autocapitalize=none autocomplete=off></textarea>
+<textarea id=code cols=80 rows=25 spellcheck=false wrap=off autocapitalize=none></textarea>
 <span class=right>
 <input type=button value=run id=run
 /><input type=button value=stop id=stop />
 <br>
-<b>Status: </b><span id=status></span>
 <b>AST: </b><span id=parse></span>
-<b>ASM: </b><span id=executable></span>
+<b>Status: </b><span id=status></span>
 <b>Out: </b><span id=output></span>
 <b>Err: </b><span id=error></span>
 <span id=input_container ><textarea id=input wrap=off cols=20 rows=1 autocapitalize=none
