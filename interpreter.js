@@ -39,13 +39,13 @@ export const Unlambda = class {
                             throw 'Parse error: Unexpected character "'+c+'" after end of program.'+"\n"
                                 + 'Are you missing a function application at the beginning?';
                         }
-                        if (c == '`') {
+                        if (!char_result && c == '`') {
                             // defer until we know what we're doing
                             left_completed.push(false);
-                        } else if (c == '.') {
+                        } else if (!char_result && c == '.') {
                             char_fn = FunctionId.Print;
                             state = CHAR;
-                        } else if (c == '?') {
+                        } else if (!char_result && c == '?') {
                             char_fn = FunctionId.Compare;
                             state = CHAR;
                         } else {
@@ -83,7 +83,6 @@ export const Unlambda = class {
                 }
             }
         }
-        console.log(''+states);
         let state_machine = new StateMachine (states, last_fn_ptr);
         return state_machine;
     }
@@ -113,7 +112,6 @@ export const Unlambda = class {
 // also reset the "current character" value. but we follow the
 // other implementations.
 const StateType = {
-    Exit: 'E',
     Void: 'V',
     CallLeft: 'U',
     CallRight: 'V',
@@ -355,9 +353,9 @@ const StateMachine = class {
         while (this.ptr.type != StateType.Exit && !this.exit) {
             this.steps++;
             switch (this.ptr.type) {
-                //console.log(''+this.ptr+' <'+call.left+' '+call.right+'> <- '+this.variable);
                 case StateType.CallLeft:
                 let call_left = states.get_call(this.ptr);
+                //console.log(''+this.ptr+' <'+call_left.left+' '+call_left.right+'> <- '+this.variable);
                 this.ptr = call_left.left;
                 // adding a chain ensures we come back to <replacement> after we resolve call.left
                 let left_replacement= states.add_resolved(SymbolFn.Variable, call_left.right);
@@ -365,6 +363,7 @@ const StateMachine = class {
                 break;
                 case StateType.CallRight:
                 let call_right = states.get_call(this.ptr);
+                //console.log(''+this.ptr+' <'+call_right.left+' '+call_right.right+'> <- '+this.variable);
                 let call_rl = call_right.left;
                 if (call_rl.id == FunctionId.Variable) { call_rl = this.variable }
                 if (call_rl.id == FunctionId.Delay) {
@@ -378,6 +377,7 @@ const StateMachine = class {
                 break;
                 case StateType.CallBoth:
                 let call_both = states.get_call(this.ptr);
+                //console.log(''+this.ptr+' <'+call_both.left+' '+call_both.right+'> <- '+this.variable);
                 this.ptr = call_both.left;
                 let replacement = states.add_call_right(SymbolFn.Variable, call_both.right);
                 this.trail = states.add_chain(replacement, this.trail);
