@@ -79,6 +79,8 @@ export const Unlambda = class {
                                     if (!last_rhs) {
                                         last_rhs = states.add_application(x, y)
                                         subcache.set(y, last_rhs);
+                                    } else {
+                                        states.inc_ref(last_rhs);
                                     }
                                 }
                                 lefts.push(last_rhs);
@@ -209,22 +211,55 @@ const State = class {
     }
 }
 
+const RefCounted = class extends Array {
+    ref_counts = [];
+    push (x) {
+        let i = super.push(x);
+        this.ref_counts[i-1] = 1;
+        return i;
+    }
+    inc_ref (i) { this.ref_counts[i]++ }
+    dec_ref (i) { this.ref_counts[i]-- }
+    toString () {
+        let s = '';
+        for (let i = 0; i < this.length && (s+=' '); i++) {
+            s += this[i]+'('+this.ref_counts[i]+')'
+        }
+        return s;
+    }
+}
+
+const RefCounted2 = class extends Array {
+    ref_counts = [];
+    push (x,y) {
+        let i = super.push(x,y);
+        this.ref_counts[(i-2)/2] = 1;
+        return i;
+    }
+    inc_ref (i) { this.ref_counts[i]++ }
+    dec_ref (i) { this.ref_counts[i]-- }
+    toString () {
+        let s = '';
+        for (let i = 0; i < this.length/2 && (s+=' '); i++) {
+            s += '<'+this[2*i]+' '+this[2*i+1]+'>('+this.ref_counts[i]+')'
+        }
+        return s;
+    }
+}
+
 const StateData = class {
-    chain_states = [];
-    call_states = [];
-    resolved_states = [];
-    simple_states = [];
-    substitute_states = [];
+    chain_states = new RefCounted2 ();
+    call_states = new RefCounted2 ();
+    simple_states = new RefCounted ();
+    substitute_states = new RefCounted2 ();
     application_cache = new Map();
     size () {
-        return this.call_states.length/2 + this.resolved_states.length/2
-            + this.chain_states.length/2
+        return this.call_states.length/2 + this.chain_states.length/2
             + this.simple_states.length + this.substitute_states.length/2
     }
     clone () {
         let sd = new StateData();
         sd.call_states = this.call_states;
-        sd.resolved_states = this.resolved_states;
         sd.chain_states = this.chain_states;
         sd.simple_states = this.simple_states;
         sd.substitute_states = this.substitute_states;
@@ -267,34 +302,86 @@ const StateData = class {
         }
         return ptr;
     }
-    add_call_left (x, y) {
-        let i = this.call_states.push(x, y)-2;
-        return new PtrFn(StateType.CallLeft, i);
+    inc_ref (x) {
+        if (x.id == FunctionId.Pointer) {
+            switch (x.type) {
+                case StateType.CallLeft:
+                case StateType.CallRight:
+                case StateType.CallBoth:
+                case StateType.Resolved:
+                this.call_states.inc_ref(x.addr/2);
+                break;
+                case StateType.Chain:
+                this.chain_states.inc_ref(x.addr/2);
+                break;
+                case StateType.Substitute2:
+                this.substitute_states.inc_ref(x.addr/2);
+                break;
+                default:
+                this.simple_states.inc_ref(x.addr);
+            }
+        }
     }
-    add_call_right (x, y) {
-        let i = this.call_states.push(x, y)-2;
-        return new PtrFn(StateType.CallRight, i);
+    add_call_left (x, y, ptr) {
+        if (ptr && this.call_states.ref_counts[ptr.addr/2] == 0) {
+            this.call_states[ptr.addr] = x;
+            this.call_states[ptr.addr+1] = y;
+            ptr.type = StateType.CallLeft;
+            return ptr;
+        } else {
+            let i = this.call_states.push(x, y)-2;
+            return new PtrFn(StateType.CallLeft, i);
+        }
     }
-    add_call_both (x, y) {
-        let i = this.call_states.push(x, y)-2;
-        return new PtrFn(StateType.CallBoth, i);
+    add_call_right (x, y, ptr) {
+        if (ptr && this.call_states.ref_counts[ptr.addr/2] == 0) {
+            this.call_states[ptr.addr] = x;
+            this.call_states[ptr.addr+1] = y;
+            ptr.type = StateType.CallRight;
+            return ptr;
+        } else {
+            let i = this.call_states.push(x, y)-2;
+            return new PtrFn(StateType.CallRight, i);
+        }
     }
-    get_call ({addr}) {
+    add_call_both (x, y, ptr) {
+        if (ptr && this.call_states.ref_counts[ptr.addr/2] == 0) {
+            this.call_states[ptr.addr] = x;
+            this.call_states[ptr.addr+1] = y;
+            ptr.type = StateType.CallBoth;
+            return ptr;
+        } else {
+            let i = this.call_states.push(x, y)-2;
+            return new PtrFn(StateType.CallBoth, i);
+        }
+    }
+    pop_call ({addr}) {
+        this.call_states.dec_ref(addr/2);
         return {left: this.call_states[addr], right: this.call_states[addr+1]}
     }
     add_chain (x, y) {
         let i = this.chain_states.push(x, y)-2;
         return new PtrFn(StateType.Chain, i);
     }
-    get_chain ({addr}) {
+    pop_chain ({addr}) {
+        this.chain_states.dec_ref(addr/2);
         return {left: this.chain_states[addr], right: this.chain_states[addr+1]}
     }
-    add_resolved (x, y) {
-        let i = this.resolved_states.push(x, y)-2;
-        return new PtrFn(StateType.Resolved, i);
+    add_resolved (x, y, ptr) {
+        if (ptr && this.call_states.ref_counts[ptr.addr/2] == 0) {
+            this.call_states[ptr.addr] = x;
+            this.call_states[ptr.addr+1] = y;
+            this.call_states.inc_ref(ptr.addr/2);
+            ptr.type = StateType.Resolved;
+            return ptr;
+        } else {
+            let i = this.call_states.push(x, y)-2;
+            return new PtrFn(StateType.Resolved, i);
+        }
     }
-    get_resolved ({addr}) {
-        return {left: this.resolved_states[addr], right: this.resolved_states[addr+1]}
+    pop_resolved ({addr}) {
+        this.call_states.dec_ref(addr/2);
+        return {left: this.call_states[addr], right: this.call_states[addr+1]}
     }
     add_simple (t, x) {
         let i = this.simple_states.push(x)-1;
@@ -303,38 +390,37 @@ const StateData = class {
     add_constant (x) {
         return this.add_simple(StateType.Constant, x);
     }
-    get_constant ({addr}) {
+    pop_constant ({addr}) {
         return this.simple_states[addr]
     }
     add_identity (x) {
         return this.add_simple(StateType.Identity, x);
     }
-    get_identity ({addr}) {
+    pop_identity ({addr}) {
         return this.simple_states[addr]
     }
     add_promise (x) {
         return this.add_simple(StateType.Promise, x);
     }
-    get_promise ({addr}) {
+    pop_promise ({addr}) {
         return this.simple_states[addr]
     }
     add_substitute (x) {
         return this.add_simple(StateType.Substitute, x);
     }
-    get_substitute ({addr}) {
+    pop_substitute ({addr}) {
         return this.simple_states[addr]
     }
     add_substitute2 (x, y) {
         let i = this.substitute_states.push(x, y)-2;
         return new PtrFn(StateType.Substitute2, i);
     }
-    get_substitute2 ({addr}) {
+    pop_substitute2 ({addr}) {
         return {left: this.substitute_states[addr], right: this.substitute_states[addr+1]}
     }
     toString () {
         return '&:' + this.chain_states + "\n"+
             'C:' + this.call_states + "\n"+
-            'R:' + this.resolved_states + "\n"+
             'S:' + this.simple_states + "\n"+
             'Z:' + this.substitute_states + "\n";
     }
@@ -355,39 +441,41 @@ const StateMachine = class {
         this.exit = false;
         let states = this.states;
         while (this.ptr.type != StateType.Exit && !this.exit) {
+            console.log(''+states);
             this.steps++;
             switch (this.ptr.type) {
                 case StateType.CallLeft:
-                let call_left = states.get_call(this.ptr);
+                let call_left = states.pop_call(this.ptr);
                 //console.log(''+this.ptr+' <'+call_left.left+' '+call_left.right+'> <- '+this.variable);
-                this.ptr = call_left.left;
                 // adding a chain ensures we come back to <replacement> after we resolve call.left
-                let left_replacement= states.add_resolved(SymbolFn.Variable, call_left.right);
+                let left_replacement= states.add_resolved(SymbolFn.Variable, call_left.right, this.ptr);
+                this.ptr = call_left.left;
                 this.trail = states.add_chain(left_replacement, this.trail);
                 break;
                 case StateType.CallRight:
-                let call_right = states.get_call(this.ptr);
+                let call_right = states.pop_call(this.ptr);
                 //console.log(''+this.ptr+' <'+call_right.left+' '+call_right.right+'> <- '+this.variable);
                 let call_rl = call_right.left;
                 if (call_rl.id == FunctionId.Variable) { call_rl = this.variable }
                 if (call_rl.id == FunctionId.Delay) {
+                    states.inc_ref(call_right.right);
                     this.variable = states.add_promise(call_right.right);
                     this.ptr = this.trail;
                 } else {
+                    let right_replacement = states.add_resolved(call_rl, SymbolFn.Variable, this.ptr);
                     this.ptr = call_right.right;
-                    let right_replacement = states.add_resolved(call_rl, SymbolFn.Variable);
                     this.trail = states.add_chain(right_replacement, this.trail);
                 }
                 break;
                 case StateType.CallBoth:
-                let call_both = states.get_call(this.ptr);
+                let call_both = states.pop_call(this.ptr);
                 //console.log(''+this.ptr+' <'+call_both.left+' '+call_both.right+'> <- '+this.variable);
+                let replacement = states.add_call_right(SymbolFn.Variable, call_both.right, this.ptr);
                 this.ptr = call_both.left;
-                let replacement = states.add_call_right(SymbolFn.Variable, call_both.right);
                 this.trail = states.add_chain(replacement, this.trail);
                 break;
                 case StateType.Resolved:
-                let rsv = states.get_resolved(this.ptr);
+                let rsv = states.pop_resolved(this.ptr);
                 //console.log(''+this.ptr+' ['+rsv.left+' '+rsv.right+'] <- '+this.variable);
                 if (rsv.left.id == FunctionId.Variable) { rsv.left = this.variable }
                 else if (rsv.right.id == FunctionId.Variable) { rsv.right = this.variable }
@@ -449,48 +537,48 @@ const StateMachine = class {
                     case FunctionId.Pointer:
                     switch (rsv.left.type) {
                         case StateType.Substitute:
-                        let subst = states.get_substitute(rsv.left);
+                        let subst = states.pop_substitute(rsv.left);
                         let z = states.add_substitute2(subst, rsv.right);
                         this.variable = z;
                         this.ptr = this.trail;
                         break;
                         case StateType.Substitute2:
-                        let subst2 = states.get_substitute2(rsv.left);
+                        let subst2 = states.pop_substitute2(rsv.left);
                         // it would be sufficient to always do: ```sLRV => `LV, `RV, `P[1]P[2].
                         // but it turns out some Ls are very common, and we can optimize
                         // those easily.
                         subst_outer: switch (subst2.left.id) {
                             case FunctionId.Identity:
                             // ```siXY = `Y`XY
+                            states.inc_ref(rsv.right);
                             let iXY = states.add_resolved(subst2.right, rsv.right);
-                            let iYXY = states.add_call_right(rsv.right, iXY);
-                            this.ptr = iYXY;
+                            this.ptr = states.add_call_right(rsv.right, iXY, this.ptr);
                             break;
                             case FunctionId.Substitute:
                             // ```ssXY = ``sY`XY = Z(Y,`XY)
+                            states.inc_ref(rsv.right);
                             let sY = states.add_substitute(rsv.right);
                             let XY = states.add_resolved(subst2.right, rsv.right);
-                            let zYXY = states.add_call_right(sY, XY);
-                            this.ptr = zYXY;
+                            this.ptr = states.add_call_right(sY, XY, this.ptr);
                             break;
                             case FunctionId.Pointer:
                             switch (subst2.left.type) {
                                 case StateType.Constant:
                                 // ```s`kXYZ = `X`YZ
-                                let constant = states.get_constant(subst2.left);
+                                let constant = states.pop_constant(subst2.left);
                                 let YZ = states.add_resolved(subst2.right, rsv.right);
-                                let XYZ = states.add_call_right(constant, YZ);
-                                this.ptr = XYZ;
+                                this.ptr = states.add_call_right(constant, YZ, this.ptr);
                                 break subst_outer;
                                 case StateType.Substitute2:
                                 // ```s``sXYZW = ```XW`YW`ZW
-                                let subst22 = states.get_substitute2(subst2.left);
+                                states.inc_ref(rsv.right);
+                                states.inc_ref(rsv.right);
+                                let subst22 = states.pop_substitute2(subst2.left);
                                 let XW = states.add_resolved(subst22.left, rsv.right);
                                 let YW = states.add_resolved(subst22.right, rsv.right);
                                 let ZW = states.add_resolved(subst2.right, rsv.right);
-                                let XWYW = states.add_call_both(XW, YW);
-                                let XWYWZW = states.add_call_both(XWYW, ZW);
-                                this.ptr = XWYWZW;
+                                let XWYW = states.add_call_both(XW, YW); // , subst2.left);
+                                this.ptr = states.add_call_both(XWYW, ZW, this.ptr);
                                 break subst_outer;
                                 /* strangely this doesn't work
                                 case StateType.Chain:
@@ -503,10 +591,10 @@ const StateMachine = class {
                             // continue;
                             default:
                             // ```sXYZ = ``XZ`YZ
+                            states.inc_ref(rsv.right);
                             let left_ptr = states.add_resolved(subst2.left, rsv.right);
                             let right_ptr = states.add_resolved(subst2.right, rsv.right);
-                            let replacement = states.add_call_both(left_ptr, right_ptr);
-                            this.ptr = replacement;
+                            this.ptr = states.add_call_both(left_ptr, right_ptr, this.ptr);
                         }
                         break;
                         case StateType.Chain:
@@ -514,21 +602,21 @@ const StateMachine = class {
                         this.ptr = rsv.left;
                         break;
                         case StateType.Constant:
-                        let constant = states.get_constant(rsv.left);
+                        let constant = states.pop_constant(rsv.left);
                         this.variable = constant;
                         this.ptr = this.trail;
                         break;
                         case StateType.Promise:
-                        let promise = states.get_promise(rsv.left);
-                        this.ptr = states.add_call_left(promise, rsv.right);
+                        let promise = states.pop_promise(rsv.left);
+                        this.ptr = states.add_call_left(promise, rsv.right, this.ptr);
                         break;
                         case StateType.Void:
                         this.variable = SymbolFn.Void;
                         this.ptr = this.trail;
                         break;
                         case StateType.Identity:
-                        let value = states.get_identity(rsv.left);
-                        this.ptr = states.add_resolved(value, rsv.right);
+                        let value = states.pop_identity(rsv.left);
+                        this.ptr = states.add_resolved(value, rsv.right, this.ptr);
                         break;
                         case StateType.Resolved:
                         throw 'Cannot resolve '+rsv.left+' because we cannot double resolve.';
@@ -546,7 +634,7 @@ const StateMachine = class {
                 }
                 break;
                 case StateType.Chain:
-                let chain = states.get_chain(this.ptr);
+                let chain = states.pop_chain(this.ptr);
                 //console.log(''+this.ptr+' '+chain.left+' -> '+chain.right);
                 this.trail = chain.right;
                 this.ptr = chain.left;
