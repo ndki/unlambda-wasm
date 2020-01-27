@@ -11,6 +11,7 @@ export const Unlambda = class {
         let char_result = void 8;
         let print_cache = new Map ();
         let compare_cache = new Map ();
+        let application_cache = new Map ();
         const READ = 0;
         const CHAR = 1;
         const CMMT = 2;
@@ -68,7 +69,17 @@ export const Unlambda = class {
                                 let last_rhs = fn;
                                 while (left_completed[left_completed.length-1]) {
                                     left_completed.pop();
-                                    last_rhs = states.add_application(lefts.pop(), last_rhs)
+                                    let x = lefts.pop(); let y = last_rhs;
+                                    let subcache = application_cache.get(x);
+                                    if (!subcache) {
+                                        subcache = new Map ();
+                                        application_cache.set(x, subcache);
+                                    }
+                                    last_rhs = subcache.get(y);
+                                    if (!last_rhs) {
+                                        last_rhs = states.add_application(x, y)
+                                        subcache.set(y, last_rhs);
+                                    }
                                 }
                                 lefts.push(last_rhs);
                                 left_completed[left_completed.length-1] = true;
@@ -220,14 +231,8 @@ const StateData = class {
         return sd;
     }
     add_application (x, y) {
-        let cache = this.application_cache.get(x);
-        if (!cache) {
-            cache = new Map ();
-            this.application_cache.set(x, cache);
-        }
-        let ptr = cache.get(y);
-        if (ptr) {
-        } else if (x.id == FunctionId.Pointer && x.eval_needed()) {
+        let ptr;
+        if (x.id == FunctionId.Pointer && x.eval_needed()) {
             if (y.id == FunctionId.Pointer && y.eval_needed()) {
                 ptr = this.add_call_both(x, y);
             } else {
@@ -260,7 +265,6 @@ const StateData = class {
                 ptr = this.add_resolved(x, y);
             }
         }
-        cache.set(y, ptr);
         return ptr;
     }
     add_call_left (x, y) {
