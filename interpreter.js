@@ -112,6 +112,7 @@ export const Unlambda = class {
 // also reset the "current character" value. but we follow the
 // other implementations.
 const StateType = {
+    Exit: 'E',
     Void: 'V',
     CallLeft: 'U',
     CallRight: 'V',
@@ -125,7 +126,6 @@ const StateType = {
     Promise: 'D',
 }
 const FunctionId = {
-    Unknown: '!',
     Variable: 'X',
     Identity: 'i',
     Void: 'v',
@@ -141,7 +141,7 @@ const FunctionId = {
 }
 
 const FnNode = class {
-    constructor (id = FunctionId.Unknown) { this.id = id }
+    constructor (id) { this.id = id }
     toString () { return this.id }
 }
 const SymbolFn = {
@@ -184,7 +184,7 @@ const PtrFn = class extends FnNode {
             || this.type == StateType.Resolved;
     }
     toString () {
-        return 'P['+this.type+this.addr+']'
+        return this.type+this.addr;
     }
 }
 const EXIT = new PtrFn(StateType.Exit,0);
@@ -405,6 +405,7 @@ const StateMachine = class {
                     this.ptr = this.trail;
                     break;
                     case FunctionId.CallCC:
+                    console.log
                     let continuation = this.trail;
                     this.ptr = states.add_resolved(rsv.right, continuation);
                     break;
@@ -443,19 +444,6 @@ const StateMachine = class {
                     // our function is the result of some resolved function
                     case FunctionId.Pointer:
                     switch (rsv.left.type) {
-                        case StateType.Identity:
-                        let value = states.get_identity(rsv.left);
-                        this.ptr = states.add_resolved(value, rsv.right);
-                        break;
-                        case StateType.Promise:
-                        let promise = states.get_promise(rsv.left);
-                        this.ptr = states.add_call_left(promise, rsv.right);
-                        break;
-                        case StateType.Constant:
-                        let constant = states.get_constant(rsv.left);
-                        this.variable = constant;
-                        this.ptr = this.trail;
-                        break;
                         case StateType.Substitute:
                         let subst = states.get_substitute(rsv.left);
                         let z = states.add_substitute2(subst, rsv.right);
@@ -464,23 +452,82 @@ const StateMachine = class {
                         break;
                         case StateType.Substitute2:
                         let subst2 = states.get_substitute2(rsv.left);
-                        let left_ptr = states.add_resolved(subst2.left, rsv.right);
-                        let right_ptr = states.add_resolved(subst2.right, rsv.right);
-                        let left_fn = left_ptr;
-                        let right_fn = right_ptr;
-                        let replacement = states.add_call_both(left_fn, right_fn);
-                        this.ptr = replacement;
+                        // it would be sufficient to always do: ```sLRV => `LV, `RV, `P[1]P[2].
+                        // but it turns out some Ls are very common, and we can optimize
+                        // those easily.
+                        subst_outer: switch (subst2.left.id) {
+                            case FunctionId.Identity:
+                            // ```siXY = `Y`XY
+                            let iXY = states.add_resolved(subst2.right, rsv.right);
+                            let iYXY = states.add_call_right(rsv.right, iXY);
+                            this.ptr = iYXY;
+                            break;
+                            case FunctionId.Substitute:
+                            // ```ssXY = ``sY`XY = Z(Y,`XY)
+                            let sY = states.add_substitute(rsv.right);
+                            let XY = states.add_resolved(subst2.right, rsv.right);
+                            let zYXY = states.add_call_right(sY, XY);
+                            this.ptr = zYXY;
+                            break;
+                            case FunctionId.Pointer:
+                            switch (subst2.left.type) {
+                                case StateType.Constant:
+                                // ```s`kXYZ = `X`YZ
+                                let constant = states.get_constant(subst2.left);
+                                let YZ = states.add_resolved(subst2.right, rsv.right);
+                                let XYZ = states.add_call_right(constant, YZ);
+                                this.ptr = XYZ;
+                                break subst_outer;
+                                case StateType.Substitute2:
+                                // ```s``sXYZW = ```XW`YW`ZW
+                                let subst22 = states.get_substitute2(subst2.left);
+                                let XW = states.add_resolved(subst22.left, rsv.right);
+                                let YW = states.add_resolved(subst22.right, rsv.right);
+                                let ZW = states.add_resolved(subst2.right, rsv.right);
+                                let XWYW = states.add_call_both(XW, YW);
+                                let XWYWZW = states.add_call_both(XWYW, ZW);
+                                this.ptr = XWYWZW;
+                                break subst_outer;
+                                /* strangely this doesn't work
+                                case StateType.Chain:
+                                // ```s<cont>XY = `<cont>X
+                                this.ptr = states.add_resolved(subst2.left, subst2.right);
+                                break subst_outer;
+                                */
+                                default:
+                            }
+                            // continue;
+                            default:
+                            // ```sXYZ = ``XZ`YZ
+                            let left_ptr = states.add_resolved(subst2.left, rsv.right);
+                            let right_ptr = states.add_resolved(subst2.right, rsv.right);
+                            let replacement = states.add_call_both(left_ptr, right_ptr);
+                            this.ptr = replacement;
+                        }
                         break;
                         case StateType.Chain:
                         this.variable = rsv.right;
                         this.ptr = rsv.left;
                         break;
+                        case StateType.Constant:
+                        let constant = states.get_constant(rsv.left);
+                        this.variable = constant;
+                        this.ptr = this.trail;
+                        break;
+                        case StateType.Promise:
+                        let promise = states.get_promise(rsv.left);
+                        this.ptr = states.add_call_left(promise, rsv.right);
+                        break;
                         case StateType.Void:
                         this.variable = SymbolFn.Void;
                         this.ptr = this.trail;
                         break;
+                        case StateType.Identity:
+                        let value = states.get_identity(rsv.left);
+                        this.ptr = states.add_resolved(value, rsv.right);
+                        break;
                         case StateType.Resolved:
-                        throw 'Cannot resolve '+rsv.left+' because we cannot double resolved.';
+                        throw 'Cannot resolve '+rsv.left+' because we cannot double resolve.';
                         break;
                         case StateType.CallLeft:
                         case StateType.CallRight:
