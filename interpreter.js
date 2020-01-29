@@ -397,62 +397,45 @@ const StateData = class {
             }
         }
     }
-    add_call_left (x, y) {
+    add_call (t, x, y) {
         let i = this.call_states.add(x, y);
         if (this.free_ptrs.length > 0) {
             let ptr = this.free_ptrs.pop();
-            ptr.type = StateType.CallLeft;
+            ptr.type = t;
             ptr.addr = i;
             return ptr;
         } else {
-            return new PtrFn(StateType.CallLeft, i);
+            return new PtrFn(t, i);
         }
+    }
+    add_call_left (x, y) {
+        return this.add_call(StateType.CallLeft, x, y);
     }
     add_call_right (x, y) {
-        let i = this.call_states.add(x, y);
-        if (this.free_ptrs.length > 0) {
-            let ptr = this.free_ptrs.pop();
-            ptr.type = StateType.CallRight;
-            ptr.addr = i;
-            return ptr;
-        } else {
-            return new PtrFn(StateType.CallRight, i);
-        }
+        return this.add_call(StateType.CallRight, x, y);
     }
     add_call_both (x, y) {
-        let i = this.call_states.add(x, y);
-        if (this.free_ptrs.length > 0) {
-            let ptr = this.free_ptrs.pop();
-            ptr.type = StateType.CallBoth;
-            ptr.addr = i;
-            return ptr;
-        } else {
-            return new PtrFn(StateType.CallBoth, i);
-        }
+        return this.add_call(StateType.CallBoth, x, y);
     }
     get_call ({addr}) {
         return {left: this.call_states[addr], right: this.call_states[addr+1]}
     }
     add_chain (x, y) {
         let i = this.chain_states.add(x, y);
-        return new PtrFn(StateType.Chain, i);
+        if (this.free_ptrs.length > 0) {
+            let ptr = this.free_ptrs.pop();
+            ptr.type = StateType.Chain;
+            ptr.addr = i;
+            return ptr;
+        } else {
+            return new PtrFn(StateType.Chain, i);
+        }
     }
     get_chain ({addr}) {
         return {left: this.chain_states[addr], right: this.chain_states[addr+1]}
     }
     add_resolved (x, y) {
-        let i = this.call_states.add(x, y);
-        if (this.free_ptrs.length > 0) {
-            let ptr = this.free_ptrs.pop();
-            ptr.type = StateType.Resolved;
-            ptr.addr = i;
-            return ptr;
-        } else {
-            return new PtrFn(StateType.Resolved, i);
-        }
-    }
-    get_resolved ({addr}) {
-        return {left: this.call_states[addr], right: this.call_states[addr+1]}
+        return this.add_call(StateType.Resolved, x, y);
     }
     add_simple (t, x) {
         let i = this.simple_states.add(x);
@@ -576,7 +559,7 @@ const StateMachine = class {
                 states.inc_ref(this.trail);
                 break;
                 case StateType.Resolved:
-                let rsv = states.get_resolved(this.ptr);
+                let rsv = states.get_call(this.ptr);
                 //console.log(''+this.ptr+' ['+rsv.left+' '+rsv.right+'] <- '+this.variable);
                 if (rsv.left.id == FunctionId.Variable) {
                     states.inc_ref(this.variable);
