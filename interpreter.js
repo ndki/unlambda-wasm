@@ -11,90 +11,102 @@ export const Unlambda = class {
         let char_result = void 8;
         let print_cache = new Map ();
         let compare_cache = new Map ();
+        let current_cache = print_cache;
         let application_cache = new Map ();
         const READ = 0;
         const CHAR = 1;
         const CMMT = 2;
         let state = READ;
         for (let c of source) {
-            if (state == READ && c == '#') {
-                state = CMMT;
-            } else {
-                switch (state) {
-                    case CMMT:
-                    if (c == "\n") state = READ;
-                    break;
-                    case CHAR:
-                    let cache = char_fn == FunctionId.Print ?
-                        print_cache : compare_cache;
-                    char_result = cache.get(c);
-                    if (!char_result) {
-                        char_result = new CharFnNode(char_fn, c);
-                        cache.set(c, char_result);
+            switch (state) {
+                case CMMT:
+                if (c == "\n") state = READ;
+                break;
+                case CHAR:
+                char_result = current_cache.get(c);
+                if (!char_result) {
+                    char_result = new CharFnNode(char_fn, c);
+                    current_cache.set(c, char_result);
+                }
+                state = READ;
+                // continue
+                case READ:
+                let fn = void 8;
+                if (char_result) {
+                    fn = char_result;
+                    char_result = void 8;
+                } else {
+                    switch (c) {
+                        case '`':
+                        // defer until we get both arguments
+                        left_completed.push(false);
+                        break;
+                        case '.':
+                        char_fn = FunctionId.Print;
+                        current_cache = print_cache;
+                        state = CHAR;
+                        break;
+                        case '?':
+                        char_fn = FunctionId.Compare;
+                        current_cache = compare_cache;
+                        state = CHAR;
+                        break;
+                        case '#':
+                        state = CMMT;
+                        break;
+                        default:
+                        fn = char2fn[c];
+                        if (fn == null && !c.match(/\s/)) {
+                            throw 'Parse error: Unrecognized character '+c+'.'
+                        }
+
                     }
-                    state = READ;
-                    // continue
-                    case READ:
-                    if (char_result || c.match(/\S/)) {
-                        if (left_completed.length == 0 && lefts.length) {
+                }
+                if (fn != null) {
+                    if (left_completed.length == 0) {
+                        if (lefts.length > 0) {
                             throw 'Parse error: Unexpected character "'+c+'" after end of program.'+"\n"
                                 + 'Are you missing a function application at the beginning?';
-                        }
-                        if (!char_result && c == '`') {
-                            // defer until we know what we're doing
-                            left_completed.push(false);
-                        } else if (!char_result && c == '.') {
-                            char_fn = FunctionId.Print;
-                            state = CHAR;
-                        } else if (!char_result && c == '?') {
-                            char_fn = FunctionId.Compare;
-                            state = CHAR;
                         } else {
-                            let fn;
-                            if (char_result !== undefined) {
-                                fn = char_result;
-                                char_result = void 8;
-                            } else if ((fn = char2fn[c]) === undefined) {
-                                throw 'Parse error: Unrecognized character '+c+'.'
+                            // program is just a single function, apparently
+                            let last_rhs = states.add_resolved(SymbolFn.Identity, fn);
+                            lefts.push(last_rhs);
+                            last_fn_ptr = last_rhs;
+                        }
+                    } else if (left_completed[left_completed.length-1]) {
+                        // complete function application using left and right! :)
+                        // then we also need to clean up those functions that were
+                        // waiting on a right-hand side.
+                        let last_rhs = fn;
+                        while (left_completed[left_completed.length-1]) {
+                            left_completed.pop();
+                            let x = lefts.pop(); let y = last_rhs;
+                            let subcache = application_cache.get(x);
+                            if (!subcache) {
+                                subcache = new Map ();
+                                application_cache.set(x, subcache);
                             }
-                            if (left_completed.length == 0) {
-                                // program is just a single function, apparently
-                                let last_rhs = states.add_resolved(SymbolFn.Identity, fn);
-                                lefts.push(last_rhs);
-                                last_fn_ptr = last_rhs;
-                            } else if (left_completed[left_completed.length-1]) {
-                                // complete function application using left and right! :)
-                                // then we also need to clean up those functions that were
-                                // waiting on a right-hand side.
-                                let last_rhs = fn;
-                                while (left_completed[left_completed.length-1]) {
-                                    left_completed.pop();
-                                    let x = lefts.pop(); let y = last_rhs;
-                                    let subcache = application_cache.get(x);
-                                    if (!subcache) {
-                                        subcache = new Map ();
-                                        application_cache.set(x, subcache);
-                                    }
-                                    last_rhs = subcache.get(y);
-                                    if (!last_rhs) {
-                                        states.inc_ref(x);
-                                        states.inc_ref(y);
-                                        last_rhs = states.add_application(x, y)
-                                        subcache.set(y, last_rhs);
-                                    }
-                                }
-                                lefts.push(last_rhs);
-                                left_completed[left_completed.length-1] = true;
-                                last_fn_ptr = last_rhs;
-                            } else {
-                                // defer until we get rhs
-                                lefts.push(fn);
-                                left_completed[left_completed.length-1] = true;
+                            last_rhs = subcache.get(y);
+                            if (!last_rhs) {
+                                states.inc_ref(x);
+                                states.inc_ref(y);
+                                last_rhs = states.add_application(x, y)
+                                subcache.set(y, last_rhs);
                             }
                         }
+                        lefts.push(last_rhs);
+                        left_completed[left_completed.length-1] = true;
+                        last_fn_ptr = last_rhs;
+                    } else {
+                        // defer until we get rhs
+                        lefts.push(fn);
+                        left_completed[left_completed.length-1] = true;
                     }
                 }
             }
+        }
+        if (left_completed.length > 0) {
+            throw "Parse error: Source ends before function application is completed."
         }
         states.inc_ref(last_fn_ptr);
         let state_machine = new StateMachine (states, last_fn_ptr);
@@ -599,7 +611,6 @@ const StateMachine = class {
                     states.inc_ref(this.ptr);
                     break;
                     case FunctionId.CallCC:
-                    console.log('callcc');
                     states.dec_ref(this.ptr);
                     let continuation = this.trail;
                     states.inc_ref(this.trail);
