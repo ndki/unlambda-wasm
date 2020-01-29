@@ -346,14 +346,14 @@ const StateData = class {
     inc_ref (x) {
         if (x.id == FunctionId.Pointer) {
             switch (x.type) {
+                case StateType.Chain:
+                this.chain_states.inc_ref(x.addr);
+                break;
+                case StateType.Resolved:
                 case StateType.CallLeft:
                 case StateType.CallRight:
                 case StateType.CallBoth:
-                case StateType.Resolved:
                 this.call_states.inc_ref(x.addr);
-                break;
-                case StateType.Chain:
-                this.chain_states.inc_ref(x.addr);
                 break;
                 case StateType.Substitute2:
                 this.substitute_states.inc_ref(x.addr);
@@ -373,21 +373,21 @@ const StateData = class {
             let m = to_dec.pop();
             if (m.id == FunctionId.Pointer) {
                 switch (m.type) {
-                    case StateType.CallLeft:
-                    case StateType.CallRight:
-                    case StateType.CallBoth:
-                    case StateType.Resolved:
-                    if (this.call_states.dec_ref(m.addr) == 0) {
-                        this.free_ptrs.push(m);
-                        to_dec.push(this.call_states[m.addr]);
-                        to_dec.push(this.call_states[m.addr+1]);
-                    }
-                    break;
                     case StateType.Chain:
                     if (this.chain_states.dec_ref(m.addr) == 0) {
                         this.free_ptrs.push(m);
                         to_dec.push(this.chain_states[m.addr]);
                         to_dec.push(this.chain_states[m.addr+1]);
+                    }
+                    break;
+                    case StateType.Resolved:
+                    case StateType.CallLeft:
+                    case StateType.CallRight:
+                    case StateType.CallBoth:
+                    if (this.call_states.dec_ref(m.addr) == 0) {
+                        this.free_ptrs.push(m);
+                        to_dec.push(this.call_states[m.addr]);
+                        to_dec.push(this.call_states[m.addr+1]);
                     }
                     break;
                     case StateType.Substitute2:
