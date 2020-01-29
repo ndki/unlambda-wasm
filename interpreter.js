@@ -70,8 +70,6 @@ export const Unlambda = class {
                                 while (left_completed[left_completed.length-1]) {
                                     left_completed.pop();
                                     let x = lefts.pop(); let y = last_rhs;
-                                    states.inc_ref(x);
-                                    states.inc_ref(y);
                                     let subcache = application_cache.get(x);
                                     if (!subcache) {
                                         subcache = new Map ();
@@ -79,6 +77,8 @@ export const Unlambda = class {
                                     }
                                     last_rhs = subcache.get(y);
                                     if (!last_rhs) {
+                                        states.inc_ref(x);
+                                        states.inc_ref(y);
                                         last_rhs = states.add_application(x, y)
                                         subcache.set(y, last_rhs);
                                     }
@@ -230,7 +230,7 @@ const RefCounted = class extends Array {
     dec_ref (i) {
         let rc = --this.ref_counts[i];
         if (rc == 0) {
-            //this.rewritables.push(i);
+            this.rewritables.push(i);
         }
         return rc;
     }
@@ -262,7 +262,7 @@ const RefCounted2 = class extends Array {
     dec_ref (i) {
         let rc = --this.ref_counts[i/2];
         if (rc == 0) {
-            //this.rewritables.push(i);
+            this.rewritables.push(i);
         }
         return rc;
     }
@@ -507,7 +507,7 @@ const StateMachine = class {
         this.exit = false;
         let states = this.states;
         while (this.ptr.type != StateType.Exit && !this.exit) {
-            console.log('P: '+this.ptr+"\nV: "+this.variable+"\nT: "+this.trail+"\n"+states);
+            //console.log('P: '+this.ptr+"\nV: "+this.variable+"\nT: "+this.trail+"\n"+states);
             this.steps++;
             switch (this.ptr.type) {
                 case StateType.CallLeft:
@@ -667,15 +667,18 @@ const StateMachine = class {
                         states.dec_ref(this.variable);
                         states.dec_ref(this.ptr);
                         let subst = states.get_substitute(rsv.left);
+                        states.inc_ref(subst);
+                        states.dec_ref(rsv.left);
                         this.variable = states.add_substitute2(subst, rsv.right);
                         states.inc_ref(this.variable);
-                        states.dec_ref(rsv.left);
                         this.ptr = this.trail;
                         states.inc_ref(this.ptr);
                         break;
                             // REFCOUNT TODO
                         case StateType.Substitute2:
                         let subst2 = states.get_substitute2(rsv.left);
+                        states.inc_ref(subst2.left);
+                        states.inc_ref(subst2.right);
                         states.dec_ref(rsv.left);
                         // it would be sufficient to always do: ```sLRV => `LV, `RV, `P[1]P[2].
                         // but it turns out some Ls are very common, and we can optimize
@@ -745,19 +748,19 @@ const StateMachine = class {
                         case StateType.Constant:
                         states.dec_ref(this.variable);
                         states.dec_ref(this.ptr);
-                        states.dec_ref(rsv.left);
                         states.dec_ref(rsv.right);
                         let constant = states.get_constant(rsv.left);
                         this.variable = constant;
-                        this.ptr = this.trail;
                         states.inc_ref(this.variable);
+                        states.dec_ref(rsv.left);
+                        this.ptr = this.trail;
                         states.inc_ref(this.ptr);
                         break;
                         case StateType.Promise:
-                        states.dec_ref(this.variable);
                         states.dec_ref(this.ptr);
-                        states.dec_ref(rsv.left);
                         let promise = states.get_promise(rsv.left);
+                        states.inc_ref(promise);
+                        states.dec_ref(rsv.left);
                         this.ptr = states.add_call_left(promise, rsv.right);
                         states.inc_ref(this.ptr);
                         break;
@@ -771,8 +774,9 @@ const StateMachine = class {
                         break;
                         case StateType.Identity:
                         states.dec_ref(this.ptr);
-                        states.dec_ref(rsv.left);
                         let value = states.get_identity(rsv.left);
+                        states.inc_ref(value);
+                        states.dec_ref(rsv.left);
                         this.ptr = states.add_resolved(value, rsv.right);
                         states.inc_ref(this.ptr);
                         break;
