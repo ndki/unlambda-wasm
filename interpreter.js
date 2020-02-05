@@ -182,24 +182,31 @@ export const Unlambda = class {
 }
 
 // we compile to a state machine...  we very frequently add states.
-// each state represents some function application,
-// although a Chain state implicitly represents the application of
-// <`NQ>, where Q is a normal continuation, and N is function that
-// calls that continuation, but with a given chain of continuations
-// (in other words, it represents a node of the callstack).
+//
+// each state represents some "function" application -- although strictly
+// speaking, undelimited continuations aren't functions (and for that matter,
+// Unlambda functions don't act very much like functions anyway). on the topic,
+// even though delimited and undelimited continuations never appear as
+// explicit functions in Unlambda code, we use a Continuation state to
+// represent the application of a delimited continuation to the
+// current variable, (in other words, it represents a node of the callstack),
+// and use a Pointer to a Continuation to represent an undelimited continuation.
+//
 // there are only a few types of function:
 // one of the symbol-functions, one of the character-functions,
 // the special Variable function, and the special Pointer function.
+//
 // the Variable special function resolves to the value of 
 // the last function application. it is the access point for
 // our single internal variable other than "current character".
-// the Pointer special function is typed. so a Pointer to a Constant
-// state is a Constant Pointer. more importantly, a Pointer to
-// Exit or Chain is a continuation, a Pointer to Call_ is an unresolved
-// function application and thus has no known value, and a Pointer to
-// anything else has the normal value of whatever it refers to as a function.
-// as far as the states go,
-// ............................... hm, i might explain that later.
+//
+// the Pointer special function is typed according to the state it references.
+// so a Pointer to a Constant state is a Constant Pointer.
+// as noted, a Pointer to a Continuation (or Exit) is an undelimited continuation.
+// a Pointer to CallX is an unresolved function application and thus has no known value
+// -- it has to be "turned into" something more sensible, and its reference evaluated.
+// a Pointer to anything else references a state with a well-defined value.
+//
 // Note: it seems really weird to me that "current character" is
 // a "global" variable. i feel like reseting the callstack should
 // also reset the "current character" value. but we follow the
@@ -211,7 +218,7 @@ const StateType = {
     CallRight: Symbol('V'),
     CallBoth: Symbol('W'),
     Resolved: Symbol('R'),
-    Chain: Symbol('&'),
+    Continuation: Symbol('&'),
     Identity: Symbol('I'),
     Constant: Symbol('K'),
     Substitute: Symbol('S'),
@@ -413,7 +420,7 @@ const StateData = class {
     inc_ref (x) {
         if (x.id == FunctionId.Pointer) {
             switch (x.type) {
-                case StateType.Chain:
+                case StateType.Continuation:
                 this.chain_states.inc_ref(x.addr);
                 break;
                 case StateType.Resolved:
@@ -440,7 +447,7 @@ const StateData = class {
             let m = to_dec.pop();
             if (m.id == FunctionId.Pointer) {
                 switch (m.type) {
-                    case StateType.Chain:
+                    case StateType.Continuation:
                     if (this.chain_states.dec_ref(m.addr) == 0) {
                         this.free_ptrs.push(m);
                         to_dec.push(this.chain_states[m.addr]);
@@ -503,11 +510,11 @@ const StateData = class {
         let i = this.chain_states.add(x, y);
         if (this.free_ptrs.length > 0) {
             let ptr = this.free_ptrs.pop();
-            ptr.type = StateType.Chain;
+            ptr.type = StateType.Continuation;
             ptr.addr = i;
             return ptr;
         } else {
-            return new PtrFn(StateType.Chain, i);
+            return new PtrFn(StateType.Continuation, i);
         }
     }
     get_chain ({addr}) {
@@ -678,7 +685,7 @@ const StateMachine = class {
                                 states.inc_ref(this.ptr);
                                 break subst_outer;
                                 /* strangely this doesn't work
-                                case StateType.Chain:
+                                case StateType.Continuation:
                                 // ```s<cont>XY = `<cont>X
                                 this.ptr = states.add_resolved(subst2.left, subst2.right);
                                 break subst_outer;
@@ -699,7 +706,7 @@ const StateMachine = class {
                             states.inc_ref(this.ptr);
                         //}
                         break;
-                        case StateType.Chain:
+                        case StateType.Continuation:
                         states.dec_ref(this.variable);
                         states.dec_ref(this.ptr);
                         this.variable = rsv.right;
@@ -831,7 +838,7 @@ const StateMachine = class {
                     throw 'Internal runtime error: '+rsv.left+' is not recognized.'
                 }
                 break;
-                case StateType.Chain:
+                case StateType.Continuation:
                 let chain = states.get_chain(this.ptr);
                 //console.log(''+this.ptr+' '+chain.left+' -> '+chain.right);
                 states.inc_ref(chain.right);
