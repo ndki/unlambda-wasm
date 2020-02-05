@@ -35,15 +35,12 @@ export const Unlambda = class {
         // binary tree of function applications.  this way,
         // we know when to add a left branch vs when to pair
         // an existing left branch with a new right branch.
-        let last_fn_ptr;
+        let last_fn_ptr = void 8;
         let lefts = [];
         let left_completed = [];
         // char_fn contains the function type information for
         // either a ".*" or "?*" function.
-        // char_result then carries the result into the normal
-        // READ sequence.
         let char_fn;
-        let char_result = void 8;
         // caches for the character functions, so ".a.a" refers
         // to the ".a" twice, instead of to two different nodes.
         let print_cache = new Map ();
@@ -63,34 +60,32 @@ export const Unlambda = class {
         // function creation (and deletion) is actually the main pragma
         // of optimizing Unlambda exection..
         for (let c of source) {
+            // current_fn holds the current node, if it exists.
+            let current_fn = void 8;
             switch (state) {
                 case CMMT:
                 // discard until newline
                 if (c == "\n") state = READ;
                 break;
                 case CHAR:
-                // complete char_fn as char_result
+                // complete char_fn as current_fn
                 // (possibly cached -- the current_cache is already
                 // modified to be the correct one to search)
-                char_result = current_cache.get(c);
-                if (!char_result) {
-                    char_result = new CharFnNode(char_fn, c);
-                    current_cache.set(c, char_result);
+                current_fn = current_cache.get(c);
+                if (!current_fn) {
+                    current_fn = new CharFnNode(char_fn, c);
+                    current_cache.set(c, current_fn);
                 }
                 state = READ;
                 // continue to READ execution
                 case READ:
+                // if we're not coming from CHAR, then we need to
                 // figure out what the current character does.
-                // if it's a function, we assign to fn.
+                // if it's a function, we assign to current_fn.
                 // if its an incomplete function, the beginning
                 // of a comment, or a function application,
                 // we change state appropriately and just move on.
-                let fn = void 8;
-                if (char_result) {
-                    // we already have the fn, from CHAR
-                    fn = char_result;
-                    char_result = void 8;
-                } else {
+                if (!current_fn) {
                     switch (c) {
                         case '`':
                         // this is a function application, so we
@@ -118,14 +113,14 @@ export const Unlambda = class {
                         // the function is well-known, so we can just
                         // look it up. if its whitespace, just skip ahead,
                         // but if its otherwise unrecognized, its an error.
-                        fn = char2fn[c];
-                        if (fn == null && !c.match(/\s/)) {
+                        current_fn = char2fn[c];
+                        if (current_fn == null && !c.match(/\s/)) {
                             throw 'Parse error: Unrecognized character '+c+'.'
                         }
 
                     }
                 }
-                if (fn != null) {
+                if (current_fn != null) {
                     if (left_completed.length == 0) {
                         // we're at the base of the tree, but still have more
                         // non-trivial input. there are two possibilities:
@@ -134,7 +129,7 @@ export const Unlambda = class {
                                 + 'Are you missing a function application at the beginning?';
                         } else {
                             // program is just a single function, apparently
-                            let last_rhs = states.add_resolved(SymbolFn.Identity, fn);
+                            let last_rhs = states.add_resolved(SymbolFn.Identity, current_fn);
                             lefts.push(last_rhs);
                             last_fn_ptr = last_rhs;
                         }
@@ -143,7 +138,7 @@ export const Unlambda = class {
                         // complete function application using left and right! :)
                         // then we also need to clean up those function applications
                         // that were waiting on a right-hand side.
-                        let last_rhs = fn;
+                        let last_rhs = current_fn;
                         while (left_completed[left_completed.length-1]) {
                             left_completed.pop();
                             let x = lefts.pop(); let y = last_rhs;
@@ -167,7 +162,7 @@ export const Unlambda = class {
                         // we don't have a left-hand side yet, so we need
                         // to set this as some left-hand side, and defer until
                         // we get the right-hand side.
-                        lefts.push(fn);
+                        lefts.push(current_fn);
                         left_completed[left_completed.length-1] = true;
                     }
                 }
