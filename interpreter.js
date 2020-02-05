@@ -138,37 +138,37 @@ export const Unlambda = class {
 // also reset the "current character" value. but we follow the
 // other implementations.
 const StateType = {
-    Exit: 'E',
-    Void: 'V',
-    CallLeft: 'U',
-    CallRight: 'V',
-    CallBoth: 'W',
-    Resolved: 'R',
-    Chain: '&',
-    Identity: 'I',
-    Constant: 'K',
-    Substitute: 'S',
-    Substitute2: 'Z',
-    Promise: 'D',
+    Exit: Symbol('E'),
+    Void: Symbol('V'),
+    CallLeft: Symbol('U'),
+    CallRight: Symbol('V'),
+    CallBoth: Symbol('W'),
+    Resolved: Symbol('R'),
+    Chain: Symbol('&'),
+    Identity: Symbol('I'),
+    Constant: Symbol('K'),
+    Substitute: Symbol('S'),
+    Substitute2: Symbol('Z'),
+    Promise: Symbol('D'),
 }
 const FunctionId = {
-    Variable: 'X',
-    Identity: 'i',
-    Void: 'v',
-    Delay: 'd',
-    Constant: 'k',
-    Substitute: 's',
-    CallCC: 'c',
-    Read: '@',
-    Reprint: '|',
-    Pointer: 'P',
-    Print: '.',
-    Compare: '?',
+    Variable: Symbol('X'),
+    Identity: Symbol('i'),
+    Void: Symbol('v'),
+    Delay: Symbol('d'),
+    Constant: Symbol('k'),
+    Substitute: Symbol('s'),
+    CallCC: Symbol('c'),
+    Read: Symbol('@'),
+    Reprint: Symbol('|'),
+    Pointer: Symbol('P'),
+    Print: Symbol('.'),
+    Compare: Symbol('?'),
 }
 
 const FnNode = class {
     constructor (id) { this.id = id }
-    toString () { return this.id }
+    toString () { return this.id.description }
 }
 const SymbolFn = {
     Variable: new FnNode(FunctionId.Variable),
@@ -183,7 +183,7 @@ const SymbolFn = {
 }
 const CharFnNode = class extends FnNode {
     constructor (id, value) { super(id); this.value = value }
-    toString () { return this.id+this.value }
+    toString () { return this.id.description + this.value }
 }
 const char2fn = {
     i: SymbolFn.Identity,
@@ -210,7 +210,7 @@ const PtrFn = class extends FnNode {
             || this.type == StateType.Resolved;
     }
     toString () {
-        return this.type+this.addr;
+        return this.type.description + this.addr;
     }
 }
 const EXIT = new PtrFn(StateType.Exit,0);
