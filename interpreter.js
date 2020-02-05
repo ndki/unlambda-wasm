@@ -217,7 +217,7 @@ const StateType = {
     CallBoth: Symbol('W'),
     Resolved: Symbol('R'),
     Continuation: Symbol('&'),
-    Identity: Symbol('I'),
+    Identity1: Symbol('I'),
     Constant1: Symbol('K'),
     Substitute1: Symbol('S'),
     Substitute2: Symbol('Z'),
@@ -396,25 +396,7 @@ const StateData = class {
             // if an application is "side-effect free"ish,
             // and has no pointers, we can (and should) already set up
             // the 'evaluated' state instead of resolving it at runtime
-            switch (x.type) {
-                case StateType.Identity:
-                ptr = this.add_identity(y);
-                break;
-                case StateType.Delay:
-                ptr = this.add_promise(y);
-                break;
-                case StateType.Constant:
-                ptr = this.add_constant(y);
-                break;
-                case StateType.Substitute:
-                ptr = this.add_substitute(y);
-                break;
-                case StateType.Void:
-                ptr = SymbolFn.Void;
-                break;
-                default:
-                ptr = this.add_resolved(x, y);
-            }
+            ptr = this.add_resolved(x, y);
         }
         return ptr;
     }
@@ -518,7 +500,29 @@ const StateData = class {
         return {left: this.chain_states[addr], right: this.chain_states[addr+1]}
     }
     add_resolved (x, y) {
-        return this.add_call(StateType.Resolved, x, y);
+        switch (x.type) {
+            case StateType.Identity:
+            return this.add_identity(y);
+            break;
+            case StateType.Delay:
+            return this.add_promise(y);
+            break;
+            case StateType.Constant:
+            return this.add_constant(y);
+            break;
+            case StateType.Substitute:
+            return this.add_substitute(y);
+            break;
+            case StateType.Void:
+            return SymbolFn.Void;
+            break;
+            case StateType.Exit:
+            return SymbolFn.Exit;
+            break;
+            /// .... ????
+            default:
+            return this.add_call(StateType.Resolved, x, y);
+        }
     }
     add_simple (t, x) {
         let i = this.simple_states.add(x);
@@ -538,7 +542,7 @@ const StateData = class {
         return this.simple_states[addr]
     }
     add_identity (x) {
-        return this.add_simple(StateType.Identity, x);
+        return this.add_simple(StateType.Identity1, x);
     }
     get_identity ({addr}) {
         return this.simple_states[addr]
@@ -726,7 +730,7 @@ const StateMachine = class {
                     this.ptr = this.trail;
                     states.inc_ref(this.ptr);
                     break;
-                    case StateType.Identity:
+                    case StateType.Identity1:
                     states.dec_ref(this.ptr);
                     let value = states.get_identity(rsv.left);
                     states.inc_ref(value);
@@ -789,7 +793,7 @@ const StateMachine = class {
                     let m = input.next();
                     if (!m.done) {
                         states.dec_ref(this.ptr);
-                        this.current_char = new CharFnNode(StateType.Print, m.addr);
+                        this.current_char = new CharFnNode(StateType.Print, m.value);
                         this.ptr = states.add_resolved(rsv.right, SymbolFn.Identity);
                         states.inc_ref(this.ptr);
                     } else if (input.eof) {
@@ -847,9 +851,9 @@ const StateMachine = class {
                 break;
                 case StateType.CallRight:
                 let call_right = states.get_call(this.ptr);
-                //console.log(''+this.ptr+' <'+call_right.left+' '+call_right.right+'> <- '+this.variable);
+                console.log(''+this.ptr+' <'+call_right.left+' '+call_right.right+'> <- '+this.variable);
                 let call_rl = call_right.left;
-                if (call_rl.id == StateType.Variable) {
+                if (call_rl.type == StateType.Variable) {
                     states.inc_ref(this.variable);
                     call_rl = this.variable;
                     states.inc_ref(call_right.right);
@@ -857,7 +861,7 @@ const StateMachine = class {
                     states.inc_ref(call_right.left);
                     states.inc_ref(call_right.right);
                 }
-                if (call_rl.id == StateType.Delay) {
+                if (call_rl.type == StateType.Delay) {
                     states.dec_ref(this.ptr);
                     states.dec_ref(this.variable);
                     this.variable = states.add_promise(call_right.right);
@@ -886,11 +890,22 @@ const StateMachine = class {
                 states.inc_ref(this.trail);
                 break;
                 case StateType.Void:
-                case StateType.Identity:
+                states.dec_ref(this.variable);
+                this.variable = this.ptr;
+                this.ptr = this.trail;
+                states.inc_ref(this.trail);
+                break;
+                case StateType.Identity1:
                 case StateType.Substitute2:
                 case StateType.Constant1:
                 case StateType.Substitute1:
                 case StateType.Promise:
+                states.dec_ref(this.variable);
+                this.variable = this.ptr;
+                this.ptr = this.trail;
+                states.inc_ref(this.trail);
+                break;
+                case StateType.Variable:
                 throw "The state "+this.ptr+" cannot be evaluated.";
                 break;
                 default:
