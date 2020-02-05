@@ -2,45 +2,104 @@
 // call Unlambda.parse(<string>) to make a state machine,
 // and then call .run() on that to execute it!
 export const Unlambda = class {
+    // we don't have use for an AST per-se.
+    // the language is so simple that its enough
+    // to parse by-character, and the only structure
+    // of a program is a binary tree of function applications.
+    //
+    // we use StateData to interpret this tree by directly
+    // translating it into a sort-of intermediate format.
     parse (source) {
         let states = new StateData ();
-        let last_fn_ptr;
-        let lefts = [];
-        let left_completed = [];
-        let char_fn;
-        let char_result = void 8;
-        let print_cache = new Map ();
-        let compare_cache = new Map ();
-        let current_cache = print_cache;
-        let application_cache = new Map ();
+        // since we're going to parse by-character, there are a few
+        // states to consider: normal READ mode, where each new character
+        // is expected to be a function or an application of functions;
+        // CHAR mode, where we complete a function like ".a" or "?z";
+        // CMMT mode, where we discard characters after a "#" until EOL.
         const READ = 0;
         const CHAR = 1;
         const CMMT = 2;
         let state = READ;
+        // in order to construct our tree in a single pass,
+        // we keep track of which part of the tree we're building.
+        //
+        // last_fn_ptr keeps track of the last branch/node.
+        // when two branches have been paired, the resulting node
+        // that points to both is stored in last_fn_ptr, and we
+        // no longer have to keep track of the pair itself.
+        //
+        // lefts keeps a list of the un-paired branches.
+        //
+        // left_completed keeps a list of branch progression,
+        // essentially encoding our current location in the
+        // binary tree of function applications.  this way,
+        // we know when to add a left branch vs when to pair
+        // an existing left branch with a new right branch.
+        let last_fn_ptr;
+        let lefts = [];
+        let left_completed = [];
+        // char_fn contains the function type information for
+        // either a ".*" or "?*" function.
+        // char_result then carries the result into the normal
+        // READ sequence.
+        let char_fn;
+        let char_result = void 8;
+        // caches for the character functions, so ".a.a" refers
+        // to the ".a" twice, instead of to two different nodes.
+        let print_cache = new Map ();
+        let compare_cache = new Map ();
+        let current_cache = print_cache;
+        // cache for function applications, so "``ii`ii" refers
+        // to the "`ii" twice, instead of to two different nodes.
+        let application_cache = new Map ();
+        // thus we're not truly building a binary tree, but it turns
+        // out to be fine. many times compilers desire to un-roll
+        // function calls and loops so that the interpreting machine
+        // (e.g. the CPU) doesn't have to keep revisiting distant
+        // references and re-initializing state. but for Unlambda,
+        // this is practically the default execution!! our executable
+        // size tends to grow, uh, "exponentially"! as the program
+        // un-rolls itself to execute. so being conservative with
+        // function creation (and deletion) is actually the main pragma
+        // of optimizing Unlambda exection..
         for (let c of source) {
             switch (state) {
                 case CMMT:
+                // discard until newline
                 if (c == "\n") state = READ;
                 break;
                 case CHAR:
+                // complete char_fn as char_result
+                // (possibly cached -- the current_cache is already
+                // modified to be the correct one to search)
                 char_result = current_cache.get(c);
                 if (!char_result) {
                     char_result = new CharFnNode(char_fn, c);
                     current_cache.set(c, char_result);
                 }
                 state = READ;
-                // continue
+                // continue to READ execution
                 case READ:
+                // figure out what the current character does.
+                // if it's a function, we assign to fn.
+                // if its an incomplete function, the beginning
+                // of a comment, or a function application,
+                // we change state appropriately and just move on.
                 let fn = void 8;
                 if (char_result) {
+                    // we already have the fn, from CHAR
                     fn = char_result;
                     char_result = void 8;
                 } else {
                     switch (c) {
                         case '`':
-                        // defer until we get both arguments
+                        // this is a function application, so we
+                        // defer adding it until we get both arguments,
+                        // by incrementing our position on the tree.
+                        // TODO handle the case of input after end of program.
                         left_completed.push(false);
                         break;
+                        // character functions transition to CHAR:
                         case '.':
                         char_fn = FunctionId.Print;
                         current_cache = print_cache;
@@ -52,9 +111,13 @@ export const Unlambda = class {
                         state = CHAR;
                         break;
                         case '#':
+                        // start of a comment.
                         state = CMMT;
                         break;
                         default:
+                        // the function is well-known, so we can just
+                        // look it up. if its whitespace, just skip ahead,
+                        // but if its otherwise unrecognized, its an error.
                         fn = char2fn[c];
                         if (fn == null && !c.match(/\s/)) {
                             throw 'Parse error: Unrecognized character '+c+'.'
@@ -64,6 +127,8 @@ export const Unlambda = class {
                 }
                 if (fn != null) {
                     if (left_completed.length == 0) {
+                        // we're at the base of the tree, but still have more
+                        // non-trivial input. there are two possibilities:
                         if (lefts.length > 0) {
                             throw 'Parse error: Unexpected character "'+c+'" after end of program.'+"\n"
                                 + 'Are you missing a function application at the beginning?';
@@ -74,9 +139,10 @@ export const Unlambda = class {
                             last_fn_ptr = last_rhs;
                         }
                     } else if (left_completed[left_completed.length-1]) {
+                        // we already have a left-hand side, so...
                         // complete function application using left and right! :)
-                        // then we also need to clean up those functions that were
-                        // waiting on a right-hand side.
+                        // then we also need to clean up those function applications
+                        // that were waiting on a right-hand side.
                         let last_rhs = fn;
                         while (left_completed[left_completed.length-1]) {
                             left_completed.pop();
@@ -98,7 +164,9 @@ export const Unlambda = class {
                         left_completed[left_completed.length-1] = true;
                         last_fn_ptr = last_rhs;
                     } else {
-                        // defer until we get rhs
+                        // we don't have a left-hand side yet, so we need
+                        // to set this as some left-hand side, and defer until
+                        // we get the right-hand side.
                         lefts.push(fn);
                         left_completed[left_completed.length-1] = true;
                     }
@@ -106,9 +174,13 @@ export const Unlambda = class {
             }
         }
         if (left_completed.length > 0) {
+            // we never reached the base of the tree
             throw "Parse error: Source ends before function application is completed."
         }
+        // i should probably explain the reference counting..
         states.inc_ref(last_fn_ptr);
+        // anyway states are done, so we can make a StateMachine with them, and
+        // use the base call as the entry state.
         let state_machine = new StateMachine (states, last_fn_ptr);
         return state_machine;
     }
