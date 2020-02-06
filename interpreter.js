@@ -64,24 +64,8 @@ export const Unlambda = class {
             // current_fn holds the current node, if it exists.
             let current_fn = void 8;
             switch (state) {
-                case CMMT:
-                // discard until newline
-                if (character == "\n") state = READ;
-                break;
-                case CHAR:
-                // complete char_fn as current_fn with current char
-                // (possibly cached -- the current_cache is already
-                // modified to be the correct one to search)
-                current_fn = current_cache.get(character);
-                if (!current_fn) {
-                    current_fn = new StateFn(char_fn, character);
-                    current_cache.set(character, current_fn);
-                }
-                state = READ;
-                break;
-                default:
-                // if we're not in CHAR or CMMT, then we need to
-                // figure out what the current character does.
+		case READ:
+                // we need to figure out what the current character does.
                 // if it's a function, we assign to current_fn.
                 // if its an incomplete function, the beginning
                 // of a comment, or a function application,
@@ -128,6 +112,22 @@ export const Unlambda = class {
                         throw ParseError.Unrecognized(source, index, character);
                     }
                 }
+                break;
+                case CHAR:
+                // complete char_fn as current_fn with current char
+                // (possibly cached -- the current_cache is already
+                // modified to be the correct one to search)
+                current_fn = current_cache.get(character);
+                if (!current_fn) {
+                    current_fn = new StateFn(char_fn, character);
+                    current_cache.set(character, current_fn);
+                }
+                state = READ;
+                break;
+                case CMMT:
+                // discard until newline
+                if (character == "\n") state = READ;
+                break;
             }
             if (current_fn != null) {
                 if (left_completed.length == 0) {
