@@ -115,8 +115,9 @@ export const Unlambda = class {
                 // complete char_fn as current_fn with current char
                 // (possibly cached -- the current_cache is already
                 // modified to be the correct one to search)
-                current_fn = current_cache.get(character);
-                if (!current_fn) {
+                if (current_cache.has(character)) {
+                    current_fn = current_cache.get(character);
+                } else {
                     current_fn = new StateFn(char_fn, character);
                     current_cache.set(character, current_fn);
                 }
@@ -142,13 +143,16 @@ export const Unlambda = class {
             while (left_completed[left_completed.length-1]) {
                 left_completed.pop();
                 let x = lefts.pop(); let y = current_fn;
-                let subcache = application_cache.get(x);
-                if (!subcache) {
+                let subcache = void 8;
+                if (application_cache.has(x)) {
+                    subcache = application_cache.get(x);
+                } else {
                     subcache = new Map ();
                     application_cache.set(x, subcache);
                 }
-                current_fn = subcache.get(y);
-                if (!current_fn) {
+                if (subcache.has(y)) {
+                    current_fn = subcache.get(y);
+                } else {
                     states.inc_ref(x);
                     states.inc_ref(y);
                     current_fn = states.add_application(x, y)
