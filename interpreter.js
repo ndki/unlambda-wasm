@@ -69,12 +69,12 @@ export const Unlambda = class {
                     // defer adding it until we get both arguments,
                     // by incrementing our position on the tree.
                     left_completed.push(false);
-                    continue;
                     // we were at the base of the tree, but a program
                     // has already been completed!
                     if (left_completed.length == 1 && lefts.length > 0) {
                         throw ParseError.LateInput(source, index, 'function application', character);
                     }
+                    continue;
                     break;
                     // normal fn:
                     case 's': current_fn = StateFn.SUBSTITUTE; break;
@@ -236,13 +236,15 @@ add_enum(ParseError, {
 // the class methods only exist on instantiation,
 // while the enum map only exists on the class object.
 const StateType = class {
+    base;
     description;
     long_description
-    constructor (description, long_description) {
+    constructor (base, description, long_description) {
+        this.base = base;
         this.description = description;
         this.long_description = long_description;
     }
-    eval_needed () {
+    is_call () {
         switch (this) {
             case StateType.Resolved:
             case StateType.CallLeft:
@@ -254,21 +256,7 @@ const StateType = class {
         }
     }
     is_stored () {
-        switch (this) {
-            case StateType.Continuation:
-            case StateType.Resolved:
-            case StateType.CallLeft:
-            case StateType.CallRight:
-            case StateType.CallBoth:
-            case StateType.Substitute2:
-            case StateType.Identity1:
-            case StateType.Constant1:
-            case StateType.Substitute1:
-            case StateType.Promise:
-            return true;
-            default:
-            return false;
-        }
+        return this.is_monad() || this.is_dyad();
     }
     is_monad () {
         switch (this) {
@@ -282,17 +270,7 @@ const StateType = class {
         }
     }
     is_dyad () {
-        switch (this) {
-            case StateType.Continuation:
-            case StateType.Resolved:
-            case StateType.CallLeft:
-            case StateType.CallRight:
-            case StateType.CallBoth:
-            case StateType.Substitute2:
-            return true;
-            default:
-            return false;
-        }
+        return this.is_call() || this == StateType.Substitute2;
     }
     toString () {
         let d = this.long_description;
@@ -302,33 +280,33 @@ const StateType = class {
 // can also just do StateType.X = Y, but this is a little nicer
 add_enum(StateType, {
     // eval-needing functions:
-    CallLeft: new StateType('U', 'call-left'), // LHS needs eval
-    CallRight: new StateType('V', 'call-right'), // RHS needs eval
-    CallBoth: new StateType('W', 'call-both'), // both sides need eval
-    Resolved: new StateType('R', 'resolved'), // neither side needs eval
+    CallLeft: new StateType('`', 'U', 'call-left'), // LHS needs eval
+    CallRight: new StateType('`', 'V', 'call-right'), // RHS needs eval
+    CallBoth: new StateType('`', 'W', 'call-both'), // both sides need eval
+    Resolved: new StateType('`', 'R', 'resolved'), // neither side needs eval
     // stand-in for anything below it:
-    Variable: new StateType('X', 'variable'),
+    Variable: new StateType('X', 'X', 'variable'),
     // execution-changing function:
-    Continuation: new StateType('&', 'continuation'),
+    Continuation: new StateType('&', '&', 'continuation'),
     // curried functions:
-    Identity1: new StateType('I', 'idX'), // going away please
-    Constant1: new StateType('K', 'constant'),
-    Substitute1: new StateType('S', 'partial substitution combinator'),
-    Substitute2: new StateType('Z', 'substitution'),
-    Promise: new StateType('D', 'promise'),
+    Identity1: new StateType('`i', 'I', 'idX'), // going away please
+    Constant1: new StateType('`k', 'K', 'constant'),
+    Substitute1: new StateType('`s', 'S', 'partial substitution combinator'),
+    Substitute2: new StateType('``s', 'Z', 'substitution'),
+    Promise: new StateType('`d', 'D', 'promise'),
     // simple functions:
-    Exit: new StateType('e', 'exit'),
-    Void: new StateType('v', 'void'),
-    Identity: new StateType('i', 'identity'),
-    Delay: new StateType('d', 'delay'),
-    Constant: new StateType('k', 'constant combinator'),
-    Substitute: new StateType('s', 'substitution combinator'),
-    CallCC: new StateType('c', 'call/cc'),
-    Read: new StateType('@', 'read'),
-    Reprint: new StateType('|', 'reprint'),
+    Exit: new StateType('e', 'e', 'exit'),
+    Void: new StateType('v', 'v', 'void'),
+    Identity: new StateType('i', 'i', 'identity'),
+    Delay: new StateType('d', 'd', 'delay'),
+    Constant: new StateType('k', 'k', 'constant combinator'),
+    Substitute: new StateType('s', 's', 'substitution combinator'),
+    CallCC: new StateType('c', 'c', 'call/cc'),
+    Read: new StateType('@', '@', 'read'),
+    Reprint: new StateType('|', '|', 'reprint'),
     // char functions:
-    Print: new StateType('.', 'print'),
-    Compare: new StateType('?', 'compare'),
+    Print: new StateType('.', '.', 'print'),
+    Compare: new StateType('?', '?', 'compare'),
 });
 
 const StateFn = class {
@@ -337,7 +315,7 @@ const StateFn = class {
         this.type = type;
         this.addr = addr;
     }
-    eval_needed () { return this.type.eval_needed() }
+    is_call () { return this.type.is_call() }
     toString () { return this.type.description + this.addr }
 }
 
@@ -424,13 +402,13 @@ const StateData = class extends Array {
         this.inc_ref(x);
         this.inc_ref(y);
         let ptr;
-        if (x.eval_needed()) {
-            if (y.eval_needed()) {
+        if (x.is_call()) {
+            if (y.is_call()) {
                 ptr = this.add_call_both(x, y);
             } else {
                 ptr = this.add_call_left(x, y);
             }
-        } else if (x.type != StateType.Delay && y.eval_needed()) {
+        } else if (x.type != StateType.Delay && y.is_call()) {
             ptr = this.add_call_right(x, y);
         } else {
             // if an application is "side-effect free"ish,
@@ -438,16 +416,16 @@ const StateData = class extends Array {
             // the 'evaluated' state instead of resolving it at runtime
             switch (x.type) {
                 case StateType.Identity:
-                return this.add_identity(y);
+                ptr = this.add_identity(y);
                 break;
                 case StateType.Delay:
-                return this.add_promise(y);
+                ptr = this.add_promise(y);
                 break;
                 case StateType.Constant:
-                return this.add_constant(y);
+                ptr = this.add_constant(y);
                 break;
                 case StateType.Substitute:
-                return this.add_substitute(y);
+                ptr = this.add_substitute(y);
                 break;
                 /* its not clear why this doesn't work
                 case StateType.Substitute1:
@@ -509,6 +487,19 @@ const StateData = class extends Array {
         }
         return s;
     }
+    pretty_print (ptr) {
+        // note: its not clear if this, like. works. in all cases..
+        let b = ptr.type.base;
+        if (ptr.type.is_dyad()) {
+            let st = this.get_dyad(ptr);
+            return b+this.pretty_print(st.left)+this.pretty_print(st.right);
+        } else if (ptr.type.is_monad()) {
+            let st = this.get_monad(ptr);
+            return b+this.pretty_print(st);
+        } else {
+            return ptr.toString();
+        }
+    }
 }
 
 const StateMachine = class {
@@ -523,6 +514,9 @@ const StateMachine = class {
     set overwrite_variable (new_value) {
         this.states.dec_ref(this._variable);
         return this._variable = new_value;
+    }
+    variable_pretty () {
+        return this.states.pretty_print(this._variable);
     }
     current_char = StateFn.VOID;
     trail = StateFn.EXIT;
@@ -644,6 +638,7 @@ const StateMachine = class {
                     //}
                     break;
                     case StateType.Continuation:
+                    case StateType.Exit:
                     states.dec_ref(this.ptr);
                     this.overwrite_variable = rsv.right;
                     this.ptr = rsv.left;
