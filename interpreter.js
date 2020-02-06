@@ -32,14 +32,14 @@ export const Unlambda = class {
         // an existing left branch with a new right branch.
         let lefts = [];
         let left_completed = [];
-        // char_fn contains the function type information for
+        // char_type contains the function type information for
         // either a ".*" or "?*" function.
-        let char_fn;
+        let char_type;
         // caches for the character functions, so ".a.a" refers
         // to the ".a" twice, instead of to two different nodes.
-        let print_cache = new Map ();
-        let compare_cache = new Map ();
-        let current_cache = print_cache;
+        let char_caches = {};
+        char_caches[StateType.Print] = new Map ();
+        char_caches[StateType.Compare] = new Map ();
         // cache for function applications, so "``ii`ii" refers
         // to the "`ii" twice, instead of to two different nodes.
         let application_cache = new Map ();
@@ -88,13 +88,11 @@ export const Unlambda = class {
                     case 'r': current_fn = StateFn.NEWLINE; break;
                     // character functions transition to CHAR:
                     case '.':
-                    char_fn = StateType.Print;
-                    current_cache = print_cache;
+                    char_type = StateType.Print;
                     state = CHAR;
                     continue;
                     case '?':
-                    char_fn = StateType.Compare;
-                    current_cache = compare_cache;
+                    char_type = StateType.Compare;
                     state = CHAR;
                     continue;
                     // start of a comment:
@@ -112,14 +110,12 @@ export const Unlambda = class {
                 }
                 break;
                 case CHAR:
-                // complete char_fn as current_fn with current char
-                // (possibly cached -- the current_cache is already
-                // modified to be the correct one to search)
-                if (current_cache.has(character)) {
-                    current_fn = current_cache.get(character);
+                // complete char_type as current_fn with current char (possibly cached)
+                if (char_caches[char_type].has(character)) {
+                    current_fn = char_caches[char_type].get(character);
                 } else {
-                    current_fn = new StateFn(char_fn, character);
-                    current_cache.set(character, current_fn);
+                    current_fn = new StateFn(char_type, character);
+                    char_caches[char_type].set(character, current_fn);
                 }
                 state = READ;
                 break;
@@ -142,22 +138,20 @@ export const Unlambda = class {
             // and complete function application using left and right! :)
             while (left_completed[left_completed.length-1]) {
                 left_completed.pop();
-                let x = lefts.pop(); let y = current_fn;
-                let subcache = void 8;
-                if (application_cache.has(x)) {
-                    subcache = application_cache.get(x);
+                let left_fn = lefts.pop();
+                if (application_cache.has(left_fn)) {
+                    let subcache = application_cache.get(left_fn);
+                    if (subcache.has(current_fn)) {
+                        current_fn = subcache.get(current_fn);
+                        continue;
+                    }
                 } else {
-                    subcache = new Map ();
-                    application_cache.set(x, subcache);
+                    application_cache.set(left_fn, new Map ());
                 }
-                if (subcache.has(y)) {
-                    current_fn = subcache.get(y);
-                } else {
-                    states.inc_ref(x);
-                    states.inc_ref(y);
-                    current_fn = states.add_application(x, y)
-                    subcache.set(y, current_fn);
-                }
+                states.inc_ref(left_fn);
+                states.inc_ref(current_fn);
+                application_cache.get(left_fn).set(current_fn,
+                    current_fn = states.add_application(left_fn, current_fn));
             }
             // finally, store whatever our function result is
             lefts.push(current_fn);
