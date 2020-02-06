@@ -148,8 +148,6 @@ export const Unlambda = class {
                 } else {
                     application_cache.set(left_fn, new Map ());
                 }
-                states.inc_ref(left_fn);
-                states.inc_ref(current_fn);
                 application_cache.get(left_fn).set(current_fn,
                     current_fn = states.add_application(left_fn, current_fn));
             }
@@ -161,8 +159,6 @@ export const Unlambda = class {
             // we never reached the base of the tree
             throw ParseError.EndsEarly(source, source.length);
         }
-        // i should probably explain the reference counting..
-        states.inc_ref(lefts[0]);
         // anyway states are done, so we can make a StateMachine with them, and
         // use the base call as the entry state.
         let state_machine = new StateMachine (states, lefts[0]);
@@ -247,10 +243,60 @@ const StateType = class {
         this.long_description = long_description;
     }
     eval_needed () {
-        return this == StateType.CallLeft
-            || this == StateType.CallRight
-            || this == StateType.CallBoth
-            || this == StateType.Resolved;
+        switch (this) {
+            case StateType.Resolved:
+            case StateType.CallLeft:
+            case StateType.CallRight:
+            case StateType.CallBoth:
+            return true;
+            default:
+            return false;
+        }
+    }
+    is_stored () {
+        switch (this) {
+            case StateType.Continuation:
+            case StateType.Resolved:
+            case StateType.CallLeft:
+            case StateType.CallRight:
+            case StateType.CallBoth:
+            case StateType.Substitute2:
+            case StateType.Identity1:
+            case StateType.Constant1:
+            case StateType.Substitute1:
+            case StateType.Promise:
+            return true;
+            default:
+            return false;
+        }
+    }
+    is_monad () {
+        switch (this) {
+            case StateType.Identity1:
+            case StateType.Constant1:
+            case StateType.Substitute1:
+            case StateType.Promise:
+            return true;
+            default:
+            return false;
+        }
+    }
+    is_dyad () {
+        switch (this) {
+            case StateType.Continuation:
+            case StateType.Resolved:
+            case StateType.CallLeft:
+            case StateType.CallRight:
+            case StateType.CallBoth:
+            case StateType.Substitute2:
+            return true;
+            default:
+            return false;
+        }
+    }
+    toString () {
+        let d = this.long_description;
+        return '['+d[0].toUpperCase()+d.slice(1)+']';
     }
 }
 // can also just do StateType.X = Y, but this is a little nicer
@@ -320,38 +366,8 @@ function add_enum (obj, dictionary) {
     }
 }
 
-const RefCounted = class extends Array {
-    ref_counts = [];
-    rewritables = [];
-    add (x) {
-        if (this.rewritables.length > 0) {
-            let i = this.rewritables.pop();
-            this[i] = x;
-            return i;
-        } else {
-            let i = super.push(x)-1;
-            this.ref_counts[i] = 0;
-            return i;
-        }
-    }
-    inc_ref (i) { return ++this.ref_counts[i] }
-    dec_ref (i) {
-        let rc = --this.ref_counts[i];
-        if (rc == 0) {
-            this.rewritables.push(i);
-        }
-        return rc;
-    }
-    toString () {
-        let s = '';
-        for (let i = 0; i < this.length && (s+=' '); i++) {
-            s += this[i]+'('+this.ref_counts[i]+')'
-        }
-        return s;
-    }
-}
-
-const RefCounted2 = class extends Array {
+const StateData = class extends Array {
+    free_ptrs = [];
     ref_counts = [];
     rewritables = [];
     add (x,y) {
@@ -362,47 +378,51 @@ const RefCounted2 = class extends Array {
             return i;
         } else {
             let i = super.push(x,y)-2;
-            this.ref_counts[i/2] = 0;
+            this.ref_counts[i >> 1] = 0;
             return i;
         }
     }
-    inc_ref (i) { return ++this.ref_counts[i/2] }
-    dec_ref (i) {
-        let rc = --this.ref_counts[i/2];
+    size () { return this.length >> 1 }
+    _inc_ref (i) { return ++this.ref_counts[i >> 1] }
+    _dec_ref (i) {
+        let rc = --this.ref_counts[i >> 1];
         if (rc == 0) {
             this.rewritables.push(i);
         }
         return rc;
     }
-    toString () {
-        let s = '';
-        for (let i = 0; i < this.length/2 && (s+=' '); i++) {
-            s += '<'+this[2*i]+' '+this[2*i+1]+'>('+this.ref_counts[i]+')'
+    inc_ref (x) {
+        if (x.type.is_stored()) {
+            this._inc_ref(x.addr);
         }
-        return s;
     }
-}
-
-const StateData = class {
-    chain_states = new RefCounted2 ();
-    call_states = new RefCounted2 ();
-    simple_states = new RefCounted ();
-    substitute_states = new RefCounted2 ();
-    application_cache = new Map();
-    free_ptrs = [];
-    size () {
-        return this.call_states.length/2 + this.chain_states.length/2
-            + this.simple_states.length + this.substitute_states.length/2
-    }
-    clone () {
-        let sd = new StateData();
-        sd.call_states = this.call_states;
-        sd.chain_states = this.chain_states;
-        sd.simple_states = this.simple_states;
-        sd.substitute_states = this.substitute_states;
-        return sd;
+    dec_ref (x) {
+        let dc = 0;
+        let to_dec = [x];
+        while (to_dec.length > 0) {
+            let m = to_dec.pop();
+            if (m.type.is_monad()) {
+                if (this._dec_ref(m.addr) == 0) {
+                    this.free_ptrs.push(m);
+                    to_dec.push(this[m.addr]);
+                }
+            } else if (m.type.is_dyad()) {
+                if (this._dec_ref(m.addr) == 0) {
+                    this.free_ptrs.push(m);
+                    to_dec.push(this[m.addr]);
+                    to_dec.push(this[m.addr+1]);
+                }
+            /*
+            } else {
+                throw 'Internal runtime error: Tried to decrease reference count at '+m+
+                    ' but '+m.type+' is not a storable type';
+            */
+            }
+        }
     }
     add_application (x, y) {
+        this.inc_ref(x);
+        this.inc_ref(y);
         let ptr;
         if (x.eval_needed()) {
             if (y.eval_needed()) {
@@ -414,138 +434,42 @@ const StateData = class {
             ptr = this.add_call_right(x, y);
         } else {
             // if an application is "side-effect free"ish,
-            // and has no pointers, we can (and should) already set up
+            // and makes no calls, we can (and should) already set up
             // the 'evaluated' state instead of resolving it at runtime
-            ptr = this.add_resolved(x, y);
+            switch (x.type) {
+                case StateType.Identity:
+                return this.add_identity(y);
+                break;
+                case StateType.Delay:
+                return this.add_promise(y);
+                break;
+                case StateType.Constant:
+                return this.add_constant(y);
+                break;
+                case StateType.Substitute:
+                return this.add_substitute(y);
+                break;
+                /* its not clear why this doesn't work
+                case StateType.Substitute1:
+                let s = this.get_monad(x);
+                this.dec_ref(x);
+                return this.add_substitute(s, y);
+                break;
+                */
+                case StateType.Void:
+                return StateFn.VOID;
+                break;
+                case StateType.Exit:
+                return StateFn.EXIT;
+                break;
+                default:
+                ptr = this.add_resolved(x, y);
+            }
         }
         return ptr;
     }
-    inc_ref (x) {
-        switch (x.type) {
-            case StateType.Continuation:
-            this.chain_states.inc_ref(x.addr);
-            break;
-            case StateType.Resolved:
-            case StateType.CallLeft:
-            case StateType.CallRight:
-            case StateType.CallBoth:
-            this.call_states.inc_ref(x.addr);
-            break;
-            case StateType.Substitute2:
-            this.substitute_states.inc_ref(x.addr);
-            break;
-            case StateType.Exit:
-            case StateType.Void:
-            break;
-            default:
-            this.simple_states.inc_ref(x.addr);
-        }
-    }
-    dec_ref (x) {
-        let dc = 0;
-        let to_dec = [x];
-        while (to_dec.length > 0) {
-            let m = to_dec.pop();
-            switch (m.type) {
-                case StateType.Continuation:
-                if (this.chain_states.dec_ref(m.addr) == 0) {
-                    this.free_ptrs.push(m);
-                    to_dec.push(this.chain_states[m.addr]);
-                    to_dec.push(this.chain_states[m.addr+1]);
-                }
-                break;
-                case StateType.Resolved:
-                case StateType.CallLeft:
-                case StateType.CallRight:
-                case StateType.CallBoth:
-                if (this.call_states.dec_ref(m.addr) == 0) {
-                    this.free_ptrs.push(m);
-                    to_dec.push(this.call_states[m.addr]);
-                    to_dec.push(this.call_states[m.addr+1]);
-                }
-                break;
-                case StateType.Substitute2:
-                if (this.substitute_states.dec_ref(m.addr) == 0) {
-                    this.free_ptrs.push(m);
-                    to_dec.push(this.substitute_states[m.addr]);
-                    to_dec.push(this.substitute_states[m.addr+1]);
-                }
-                break;
-                case StateType.Exit:
-                case StateType.Void:
-                break;
-                default:
-                if (this.simple_states.dec_ref(m.addr) == 0) {
-                    this.free_ptrs.push(m);
-                    to_dec.push(this.simple_states[m.addr]);
-                }
-            }
-        }
-    }
-    add_call (t, x, y) {
-        let i = this.call_states.add(x, y);
-        if (this.free_ptrs.length > 0) {
-            let ptr = this.free_ptrs.pop();
-            ptr.type = t;
-            ptr.addr = i;
-            return ptr;
-        } else {
-            return new StateFn(t, i);
-        }
-    }
-    add_call_left (x, y) {
-        return this.add_call(StateType.CallLeft, x, y);
-    }
-    add_call_right (x, y) {
-        return this.add_call(StateType.CallRight, x, y);
-    }
-    add_call_both (x, y) {
-        return this.add_call(StateType.CallBoth, x, y);
-    }
-    get_call ({addr}) {
-        return {left: this.call_states[addr], right: this.call_states[addr+1]}
-    }
-    add_chain (x, y) {
-        let i = this.chain_states.add(x, y);
-        if (this.free_ptrs.length > 0) {
-            let ptr = this.free_ptrs.pop();
-            ptr.type = StateType.Continuation;
-            ptr.addr = i;
-            return ptr;
-        } else {
-            return new StateFn(StateType.Continuation, i);
-        }
-    }
-    get_chain ({addr}) {
-        return {left: this.chain_states[addr], right: this.chain_states[addr+1]}
-    }
-    add_resolved (x, y) {
-        switch (x.type) {
-            case StateType.Identity:
-            return this.add_identity(y);
-            break;
-            case StateType.Delay:
-            return this.add_promise(y);
-            break;
-            case StateType.Constant:
-            return this.add_constant(y);
-            break;
-            case StateType.Substitute:
-            return this.add_substitute(y);
-            break;
-            case StateType.Void:
-            return StateFn.VOID;
-            break;
-            case StateType.Exit:
-            return StateFn.EXIT;
-            break;
-            /// .... ????
-            default:
-            return this.add_call(StateType.Resolved, x, y);
-        }
-    }
-    add_simple (t, x) {
-        let i = this.simple_states.add(x);
+    add_monad (t, x) {
+        let i = this.add(StateFn.IDENTITY, x);
         if (this.free_ptrs.length > 0) {
             let ptr = this.free_ptrs.pop();
             ptr.type = t;
@@ -555,47 +479,51 @@ const StateData = class {
             return new StateFn(t, i)
         }
     }
-    add_constant (x) {
-        return this.add_simple(StateType.Constant1, x);
+    add_dyad (t, x, y) {
+        let i = this.add(x, y);
+        if (this.free_ptrs.length > 0) {
+            let ptr = this.free_ptrs.pop();
+            ptr.type = t;
+            ptr.addr = i;
+            return ptr;
+        } else {
+            return new StateFn(t, i);
+        }
     }
-    get_constant ({addr}) {
-        return this.simple_states[addr]
-    }
-    add_identity (x) {
-        return this.add_simple(StateType.Identity1, x);
-    }
-    get_identity ({addr}) {
-        return this.simple_states[addr]
-    }
-    add_promise (x) {
-        return this.add_simple(StateType.Promise, x);
-    }
-    get_promise ({addr}) {
-        return this.simple_states[addr]
-    }
-    add_substitute (x) {
-        return this.add_simple(StateType.Substitute1, x);
-    }
-    get_substitute ({addr}) {
-        return this.simple_states[addr]
-    }
-    add_substitute2 (x, y) {
-        let i = this.substitute_states.add(x, y);
-        return new StateFn(StateType.Substitute2, i);
-    }
-    get_substitute2 ({addr}) {
-        return {left: this.substitute_states[addr], right: this.substitute_states[addr+1]}
-    }
+    get_monad ({addr}) { return this[addr + 1] }
+    get_dyad ({addr}) { return {left: this[addr], right: this[addr+1]} }
+    add_constant (x) { return this.add_monad(StateType.Constant1, x) }
+    add_identity (x) { return this.add_monad(StateType.Identity1, x) }
+    add_promise (x) { return this.add_monad(StateType.Promise, x) }
+    add_substitute (x) { return this.add_monad(StateType.Substitute1, x) }
+    add_call_left (x, y) { return this.add_dyad(StateType.CallLeft, x, y) }
+    add_call_right (x, y) { return this.add_dyad(StateType.CallRight, x, y) }
+    add_call_both (x, y) { return this.add_dyad(StateType.CallBoth, x, y) }
+    add_chain (x, y) { return this.add_dyad(StateType.Continuation, x, y) }
+    add_resolved (x, y) { return this.add_dyad(StateType.Resolved, x, y) }
+    add_substitute2 (x, y) { return this.add_dyad(StateType.Substitute2, x, y) }
     toString () {
-        return '&:' + this.chain_states + "\n"+
-            'C:' + this.call_states + "\n"+
-            'S:' + this.simple_states + "\n"+
-            'Z:' + this.substitute_states + "\n";
+        let s = '';
+        for (let i = 0; i < this.length; i += 2) {
+            s += i+': <'+this[i]+' '+this[i+1]+'>('+this.ref_counts[i >> 1]+')\n'
+        }
+        return s;
     }
 }
 
 const StateMachine = class {
-    variable = StateFn.EXIT;
+    _variable = StateFn.EXIT;
+    get variable () {
+        return this._variable;
+    }
+    get dup_variable () {
+        this.states.inc_ref(this._variable);
+        return this._variable;
+    }
+    set overwrite_variable (new_value) {
+        this.states.dec_ref(this._variable);
+        return this._variable = new_value;
+    }
     current_char = StateFn.VOID;
     trail = StateFn.EXIT;
     ptr; states;
@@ -603,25 +531,24 @@ const StateMachine = class {
     steps = 0;
     constructor (states, init) {
         this.states = states;
+        this.states.inc_ref(init);
         this.ptr = init;
     }
     run (input, output) {
         this.exit = false;
         let states = this.states;
         while (this.ptr.type != StateType.Exit && !this.exit) {
-            console.log('P: '+this.ptr+"\nV: "+this.variable+"\nT: "+this.trail+"\n"+states);
+            //console.log('P: '+this.ptr+"\nV: "+this.variable+"\nT: "+this.trail+"\n"+states);
             this.steps++;
             switch (this.ptr.type) {
                 case StateType.Resolved:
-                let rsv = states.get_call(this.ptr);
+                let rsv = states.get_dyad(this.ptr);
                 //console.log(''+this.ptr+' ['+rsv.left+' '+rsv.right+'] <- '+this.variable);
                 if (rsv.left.type == StateType.Variable) {
-                    states.inc_ref(this.variable);
-                    rsv.left = this.variable
+                    rsv.left = this.dup_variable;
                     states.inc_ref(rsv.right);
                 } else if (rsv.right.type == StateType.Variable) {
-                    states.inc_ref(this.variable);
-                    rsv.right = this.variable
+                    rsv.right = this.dup_variable;
                     states.inc_ref(rsv.left);
                 } else {
                     states.inc_ref(rsv.left);
@@ -630,18 +557,17 @@ const StateMachine = class {
                 // the function determines what we do
                 switch (rsv.left.type) {
                     case StateType.Substitute1:
-                    states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
-                    let subst = states.get_substitute(rsv.left);
+                    let subst = states.get_monad(rsv.left);
                     states.inc_ref(subst);
                     states.dec_ref(rsv.left);
-                    this.variable = states.add_substitute2(subst, rsv.right);
+                    this.overwrite_variable = states.add_substitute2(subst, rsv.right);
                     states.inc_ref(this.variable);
                     this.ptr = this.trail;
                     states.inc_ref(this.ptr);
                     break;
                     case StateType.Substitute2:
-                    let subst2 = states.get_substitute2(rsv.left);
+                    let subst2 = states.get_dyad(rsv.left);
                     states.inc_ref(subst2.left);
                     states.inc_ref(subst2.right);
                     states.dec_ref(rsv.left);
@@ -673,7 +599,7 @@ const StateMachine = class {
                         case StateType.Constant1:
                         // ```s`kXYZ = `X`YZ
                         states.dec_ref(this.ptr);
-                        let constant = states.get_constant(subst2.left);
+                        let constant = states.get_monad(subst2.left);
                         states.inc_ref(constant);
                         states.dec_ref(subst2.left);
                         let YZ = states.add_resolved(subst2.right, rsv.right);
@@ -685,7 +611,7 @@ const StateMachine = class {
                         // ```s``sXYZW = ```XW`YW`ZW
                         states.inc_ref(rsv.right);
                         states.inc_ref(rsv.right);
-                        let subst22 = states.get_substitute2(subst2.left);
+                        let subst22 = states.get_dyad(subst2.left);
                         states.inc_ref(subst22.left);
                         states.inc_ref(subst22.right);
                         states.dec_ref(subst2.left);
@@ -718,17 +644,15 @@ const StateMachine = class {
                     //}
                     break;
                     case StateType.Continuation:
-                    states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
-                    this.variable = rsv.right;
+                    this.overwrite_variable = rsv.right;
                     this.ptr = rsv.left;
                     break;
                     case StateType.Constant1:
-                    states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
                     states.dec_ref(rsv.right);
-                    let constant = states.get_constant(rsv.left);
-                    this.variable = constant;
+                    let constant = states.get_monad(rsv.left);
+                    this.overwrite_variable = constant;
                     states.inc_ref(this.variable);
                     states.dec_ref(rsv.left);
                     this.ptr = this.trail;
@@ -736,23 +660,22 @@ const StateMachine = class {
                     break;
                     case StateType.Promise:
                     states.dec_ref(this.ptr);
-                    let promise = states.get_promise(rsv.left);
+                    let promise = states.get_monad(rsv.left);
                     states.inc_ref(promise);
                     states.dec_ref(rsv.left);
                     this.ptr = states.add_call_left(promise, rsv.right);
                     states.inc_ref(this.ptr);
                     break;
                     case StateType.Void:
-                    states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
                     states.dec_ref(rsv.right);
-                    this.variable = StateFn.VOID;
+                    this.overwrite_variable = StateFn.VOID;
                     this.ptr = this.trail;
                     states.inc_ref(this.ptr);
                     break;
                     case StateType.Identity1:
                     states.dec_ref(this.ptr);
-                    let value = states.get_identity(rsv.left);
+                    let value = states.get_monad(rsv.left);
                     states.inc_ref(value);
                     states.dec_ref(rsv.left);
                     this.ptr = states.add_resolved(value, rsv.right);
@@ -767,17 +690,15 @@ const StateMachine = class {
                     throw 'Cannot resolve '+rsv.left+' because Calls cannot be resolved.';
                     break;
                     case StateType.Substitute:
-                    states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
-                    this.variable = states.add_substitute(rsv.right);
+                    this.overwrite_variable = states.add_substitute(rsv.right);
                     states.inc_ref(this.variable);
                     this.ptr = this.trail;
                     states.inc_ref(this.ptr);
                     break;
                     case StateType.Constant:
-                    states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
-                    this.variable = states.add_constant(rsv.right);
+                    this.overwrite_variable = states.add_constant(rsv.right);
                     states.inc_ref(this.variable);
                     this.ptr = this.trail;
                     states.inc_ref(this.ptr);
@@ -788,9 +709,8 @@ const StateMachine = class {
                     output.push(rsv.left.addr);
                     case StateType.Identity:
                     case StateType.Delay:
-                    states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
-                    this.variable = rsv.right;
+                    this.overwrite_variable = rsv.right;
                     this.ptr = this.trail;
                     states.inc_ref(this.ptr);
                     break;
@@ -802,10 +722,9 @@ const StateMachine = class {
                     states.inc_ref(this.ptr);
                     break;
                     case StateType.Void:
-                    states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
                     states.dec_ref(rsv.right);
-                    this.variable = StateFn.VOID;
+                    this.overwrite_variable = StateFn.VOID;
                     this.ptr = this.trail;
                     states.inc_ref(this.ptr);
                     break;
@@ -847,7 +766,7 @@ const StateMachine = class {
                 }
                 break;
                 case StateType.Continuation:
-                let chain = states.get_chain(this.ptr);
+                let chain = states.get_dyad(this.ptr);
                 //console.log(''+this.ptr+' '+chain.left+' -> '+chain.right);
                 states.inc_ref(chain.right);
                 states.inc_ref(chain.left);
@@ -857,7 +776,7 @@ const StateMachine = class {
                 this.ptr = chain.left;
                 break;
                 case StateType.CallLeft:
-                let call_left = states.get_call(this.ptr);
+                let call_left = states.get_dyad(this.ptr);
                 states.inc_ref(call_left.left)
                 states.inc_ref(call_left.right);
                 states.dec_ref(this.ptr);
@@ -870,8 +789,8 @@ const StateMachine = class {
                 states.inc_ref(this.trail);
                 break;
                 case StateType.CallRight:
-                let call_right = states.get_call(this.ptr);
-                console.log(''+this.ptr+' <'+call_right.left+' '+call_right.right+'> <- '+this.variable);
+                let call_right = states.get_dyad(this.ptr);
+                //console.log(''+this.ptr+' <'+call_right.left+' '+call_right.right+'> <- '+this.variable);
                 let call_rl = call_right.left;
                 if (call_rl.type == StateType.Variable) {
                     states.inc_ref(this.variable);
@@ -883,8 +802,7 @@ const StateMachine = class {
                 }
                 if (call_rl.type == StateType.Delay) {
                     states.dec_ref(this.ptr);
-                    states.dec_ref(this.variable);
-                    this.variable = states.add_promise(call_right.right);
+                    this.overwrite_variable = states.add_promise(call_right.right);
                     this.ptr = this.trail;
                     states.inc_ref(this.variable);
                     states.inc_ref(this.trail);
@@ -898,7 +816,7 @@ const StateMachine = class {
                 }
                 break;
                 case StateType.CallBoth:
-                let call_both = states.get_call(this.ptr);
+                let call_both = states.get_dyad(this.ptr);
                 states.inc_ref(call_both.left);
                 states.inc_ref(call_both.right);
                 states.dec_ref(this.ptr);
@@ -910,8 +828,7 @@ const StateMachine = class {
                 states.inc_ref(this.trail);
                 break;
                 case StateType.Void:
-                states.dec_ref(this.variable);
-                this.variable = this.ptr;
+                this.overwrite_variable = this.ptr;
                 this.ptr = this.trail;
                 states.inc_ref(this.trail);
                 break;
@@ -920,8 +837,7 @@ const StateMachine = class {
                 case StateType.Constant1:
                 case StateType.Substitute1:
                 case StateType.Promise:
-                states.dec_ref(this.variable);
-                this.variable = this.ptr;
+                this.overwrite_variable = this.ptr;
                 this.ptr = this.trail;
                 states.inc_ref(this.trail);
                 break;
