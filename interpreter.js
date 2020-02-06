@@ -73,7 +73,7 @@ export const Unlambda = class {
                 // modified to be the correct one to search)
                 current_fn = current_cache.get(c);
                 if (!current_fn) {
-                    current_fn = new CharFnNode(char_fn, c);
+                    current_fn = new StateFn(char_fn, c);
                     current_cache.set(c, current_fn);
                 }
                 state = READ;
@@ -113,7 +113,7 @@ export const Unlambda = class {
                         // the function is well-known, so we can just
                         // look it up. if its whitespace, just skip ahead,
                         // but if its otherwise unrecognized, its an error.
-                        current_fn = char2fn[c];
+                        current_fn = SymbolFn.fromChar[c];
                         if (current_fn == null && !c.match(/\s/)) {
                             throw 'Parse error: Unrecognized character '+c+'.'
                         }
@@ -211,93 +211,93 @@ export const Unlambda = class {
 // a "global" variable. i feel like reseting the callstack should
 // also reset the "current character" value. but we follow the
 // other implementations.
-const StateType = {
-    CallLeft: Symbol('U'),
-    CallRight: Symbol('V'),
-    CallBoth: Symbol('W'),
-    Resolved: Symbol('R'),
-    Continuation: Symbol('&'),
-    Identity1: Symbol('I'),
-    Constant1: Symbol('K'),
-    Substitute1: Symbol('S'),
-    Substitute2: Symbol('Z'),
-    Promise: Symbol('D'),
-// functions
-    Variable: Symbol('X'),
-    Exit: Symbol('e'),
-    Void: Symbol('v'),
-    Identity: Symbol('i'),
-    Delay: Symbol('d'),
-    Constant: Symbol('k'),
-    Substitute: Symbol('s'),
-    CallCC: Symbol('c'),
-    Read: Symbol('@'),
-    Reprint: Symbol('|'),
-    Pointer: Symbol('P'),
-    Print: Symbol('.'),
-    Compare: Symbol('?'),
+
+// this is one way to do enums in javascript.
+// the class methods only exist on instantiation,
+// while the enum map only exists on the class object.
+const StateType = class {
+    description;
+    constructor (description) { this.description = description }
+    eval_needed () {
+        return this == StateType.CallLeft
+            || this == StateType.CallRight
+            || this == StateType.CallBoth
+            || this == StateType.Resolved;
+    }
+}
+// can also just do StateType.X = Y, but this is a little nicer
+let _StateType = {
+    // eval-needing functions:
+    CallLeft: new StateType('U'), // LHS needs eval
+    CallRight: new StateType('V'), // RHS needs eval
+    CallBoth: new StateType('W'), // both sides need eval
+    Resolved: new StateType('R'), // neither side needs eval
+    // stand-in for anything below it:
+    Variable: new StateType('X'),
+    // execution-changing function:
+    Continuation: new StateType('&'),
+    // curried functions:
+    Identity1: new StateType('I'), // going away please
+    Constant1: new StateType('K'),
+    Substitute1: new StateType('S'),
+    Substitute2: new StateType('Z'),
+    Promise: new StateType('D'),
+    // simple functions:
+    Exit: new StateType('e'),
+    Void: new StateType('v'),
+    Identity: new StateType('i'),
+    Delay: new StateType('d'),
+    Constant: new StateType('k'),
+    Substitute: new StateType('s'),
+    CallCC: new StateType('c'),
+    Read: new StateType('@'),
+    Reprint: new StateType('|'),
+    Pointer: new StateType('P'),
+    // char functions:
+    Print: new StateType('.'),
+    Compare: new StateType('?'),
+}
+let st_prop = Object.create(null);
+st_prop.enumerable = true;
+for (let key in _StateType) {
+    st_prop.value = _StateType[key];
+    Object.defineProperty(StateType, key, st_prop);
 }
 
-const FnNode = class {
-    constructor (id) { this.id = id }
-    toString () { return this.id.description }
-}
-/*
-const CharFnNode = class extends FnNode {
-    constructor (id, value) { super(id); this.addr = value }
-    toString () { return this.id.description + this.addr }
-}
-*/
-const PtrFn = class extends FnNode {
+const StateFn = class {
     type; addr;
     constructor (type, addr) {
-        super(StateType.Pointer);
         this.type = type;
         this.addr = addr;
     }
-    eval_needed () {
-        return this.type == StateType.CallLeft
-            || this.type == StateType.CallRight
-            || this.type == StateType.CallBoth
-            || this.type == StateType.Resolved;
-    }
-    toString () {
-        return this.type.description + this.addr;
-    }
+    eval_needed () { return this.type.eval_needed() }
+    toString () { return this.type.description + this.addr }
 }
-const CharFnNode = class extends PtrFn {
-}
+
 const SymbolFn = {
-    Void: new PtrFn(StateType.Void, 0),
-    Exit: new PtrFn(StateType.Exit, 0),
-    Variable: new PtrFn(StateType.Variable, 0),
-    Identity: new PtrFn(StateType.Identity, 0),
-    Void: new PtrFn(StateType.Void, 0),
-    Delay: new PtrFn(StateType.Delay, 0),
-    Constant: new PtrFn(StateType.Constant, 0),
-    Substitute: new PtrFn(StateType.Substitute, 0),
-    CallCC: new PtrFn(StateType.CallCC, 0),
-    Read: new PtrFn(StateType.Read, 0),
-    Reprint: new PtrFn(StateType.Reprint, 0),
+    Void: new StateFn(StateType.Void, ''),
+    Exit: new StateFn(StateType.Exit, ''),
+    Variable: new StateFn(StateType.Variable, ''),
+    Identity: new StateFn(StateType.Identity, ''),
+    Void: new StateFn(StateType.Void, ''),
+    Delay: new StateFn(StateType.Delay, ''),
+    Constant: new StateFn(StateType.Constant, ''),
+    Substitute: new StateFn(StateType.Substitute, ''),
+    CallCC: new StateFn(StateType.CallCC, ''),
+    Read: new StateFn(StateType.Read, ''),
+    Reprint: new StateFn(StateType.Reprint, ''),
 }
-const char2fn = {
+
+SymbolFn.fromChar = {
     i: SymbolFn.Identity,
     v: SymbolFn.Void,
     d: SymbolFn.Delay,
     k: SymbolFn.Constant,
     s: SymbolFn.Substitute,
     c: SymbolFn.CallCC,
-    r: new CharFnNode(StateType.Print, "\n"),
+    r: new StateFn(StateType.Print, "\n"),
     '@': SymbolFn.Read,
     '|': SymbolFn.Reprint,
-}
-
-const State = class {
-    left; right;
-    toString () {
-        return this.right ? this.left ? '<'+this.left+' '+this.right+'>'
-            : '<'+this.right+'>' : '<>'
-    }
 }
 
 const RefCounted = class extends Array {
@@ -470,7 +470,7 @@ const StateData = class {
             ptr.addr = i;
             return ptr;
         } else {
-            return new PtrFn(t, i);
+            return new StateFn(t, i);
         }
     }
     add_call_left (x, y) {
@@ -493,7 +493,7 @@ const StateData = class {
             ptr.addr = i;
             return ptr;
         } else {
-            return new PtrFn(StateType.Continuation, i);
+            return new StateFn(StateType.Continuation, i);
         }
     }
     get_chain ({addr}) {
@@ -532,7 +532,7 @@ const StateData = class {
             ptr.addr = i;
             return ptr;
         } else {
-            return new PtrFn(t, i)
+            return new StateFn(t, i)
         }
     }
     add_constant (x) {
@@ -561,7 +561,7 @@ const StateData = class {
     }
     add_substitute2 (x, y) {
         let i = this.substitute_states.add(x, y);
-        return new PtrFn(StateType.Substitute2, i);
+        return new StateFn(StateType.Substitute2, i);
     }
     get_substitute2 ({addr}) {
         return {left: this.substitute_states[addr], right: this.substitute_states[addr+1]}
@@ -793,7 +793,7 @@ const StateMachine = class {
                     let m = input.next();
                     if (!m.done) {
                         states.dec_ref(this.ptr);
-                        this.current_char = new CharFnNode(StateType.Print, m.value);
+                        this.current_char = new StateFn(StateType.Print, m.value);
                         this.ptr = states.add_resolved(rsv.right, SymbolFn.Identity);
                         states.inc_ref(this.ptr);
                     } else if (input.eof) {
