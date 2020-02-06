@@ -105,15 +105,21 @@ export const Unlambda = class {
                         current_cache = compare_cache;
                         state = CHAR;
                         break;
-                        case '#':
-                        // start of a comment.
-                        state = CMMT;
-                        break;
+                        // start of a comment:
+                        case '#': state = CMMT; break;
+                        // normal fn:
+                        case 'i': current_fn = StateFn.IDENTITY; break;
+                        case 'v': current_fn = StateFn.VOID; break;
+                        case 'd': current_fn = StateFn.DELAY; break;
+                        case 'k': current_fn = StateFn.CONSTANT; break;
+                        case 's': current_fn = StateFn.SUBSTITUTE; break;
+                        case 'c': current_fn = StateFn.CALLCC; break;
+                        case 'r': current_fn = StateFn.NEWLINE; break;
+                        case '@': current_fn = StateFn.READ; break;
+                        case '|': current_fn = StateFn.REPRINT; break;
                         default:
-                        // the function is well-known, so we can just
-                        // look it up. if its whitespace, just skip ahead,
+                        // if its whitespace, just skip ahead,
                         // but if its otherwise unrecognized, its an error.
-                        current_fn = SymbolFn.fromChar[c];
                         if (current_fn == null && !c.match(/\s/)) {
                             throw 'Parse error: Unrecognized character '+c+'.'
                         }
@@ -129,7 +135,7 @@ export const Unlambda = class {
                                 + 'Are you missing a function application at the beginning?';
                         } else {
                             // program is just a single function, apparently
-                            let last_rhs = states.add_resolved(SymbolFn.Identity, current_fn);
+                            let last_rhs = states.add_resolved(StateFn.IDENTITY, current_fn);
                             lefts.push(last_rhs);
                             last_fn_ptr = last_rhs;
                         }
@@ -226,7 +232,7 @@ const StateType = class {
     }
 }
 // can also just do StateType.X = Y, but this is a little nicer
-let _StateType = {
+add_enum(StateType, {
     // eval-needing functions:
     CallLeft: new StateType('U'), // LHS needs eval
     CallRight: new StateType('V'), // RHS needs eval
@@ -256,13 +262,7 @@ let _StateType = {
     // char functions:
     Print: new StateType('.'),
     Compare: new StateType('?'),
-}
-let st_prop = Object.create(null);
-st_prop.enumerable = true;
-for (let key in _StateType) {
-    st_prop.value = _StateType[key];
-    Object.defineProperty(StateType, key, st_prop);
-}
+});
 
 const StateFn = class {
     type; addr;
@@ -274,30 +274,29 @@ const StateFn = class {
     toString () { return this.type.description + this.addr }
 }
 
-const SymbolFn = {
-    Void: new StateFn(StateType.Void, ''),
-    Exit: new StateFn(StateType.Exit, ''),
-    Variable: new StateFn(StateType.Variable, ''),
-    Identity: new StateFn(StateType.Identity, ''),
-    Void: new StateFn(StateType.Void, ''),
-    Delay: new StateFn(StateType.Delay, ''),
-    Constant: new StateFn(StateType.Constant, ''),
-    Substitute: new StateFn(StateType.Substitute, ''),
-    CallCC: new StateFn(StateType.CallCC, ''),
-    Read: new StateFn(StateType.Read, ''),
-    Reprint: new StateFn(StateType.Reprint, ''),
-}
+// some functions can have little a unique StateFn. as a treat.
+add_enum(StateFn, {
+    VOID: new StateFn(StateType.Void, ''),
+    EXIT: new StateFn(StateType.Exit, ''),
+    VARIABLE: new StateFn(StateType.Variable, ''),
+    IDENTITY: new StateFn(StateType.Identity, ''),
+    VOID: new StateFn(StateType.Void, ''),
+    DELAY: new StateFn(StateType.Delay, ''),
+    CONSTANT: new StateFn(StateType.Constant, ''),
+    SUBSTITUTE: new StateFn(StateType.Substitute, ''),
+    CALLCC: new StateFn(StateType.CallCC, ''),
+    NEWLINE: new StateFn(StateType.Print, "\n"),
+    READ: new StateFn(StateType.Read, ''),
+    REPRINT: new StateFn(StateType.Reprint, ''),
+});
 
-SymbolFn.fromChar = {
-    i: SymbolFn.Identity,
-    v: SymbolFn.Void,
-    d: SymbolFn.Delay,
-    k: SymbolFn.Constant,
-    s: SymbolFn.Substitute,
-    c: SymbolFn.CallCC,
-    r: new StateFn(StateType.Print, "\n"),
-    '@': SymbolFn.Read,
-    '|': SymbolFn.Reprint,
+function add_enum (obj, dictionary) {
+    let st_prop = Object.create(null);
+    st_prop.enumerable = true;
+    for (let key in dictionary) {
+        st_prop.value = dictionary[key];
+        Object.defineProperty(obj, key, st_prop);
+    }
 }
 
 const RefCounted = class extends Array {
@@ -514,10 +513,10 @@ const StateData = class {
             return this.add_substitute(y);
             break;
             case StateType.Void:
-            return SymbolFn.Void;
+            return StateFn.VOID;
             break;
             case StateType.Exit:
-            return SymbolFn.Exit;
+            return StateFn.EXIT;
             break;
             /// .... ????
             default:
@@ -575,9 +574,9 @@ const StateData = class {
 }
 
 const StateMachine = class {
-    variable = SymbolFn.Exit;
-    current_char = SymbolFn.Void;
-    trail = SymbolFn.Exit;
+    variable = StateFn.EXIT;
+    current_char = StateFn.VOID;
+    trail = StateFn.EXIT;
     ptr; states;
     exit = false;
     steps = 0;
@@ -726,7 +725,7 @@ const StateMachine = class {
                     states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
                     states.dec_ref(rsv.right);
-                    this.variable = SymbolFn.Void;
+                    this.variable = StateFn.VOID;
                     this.ptr = this.trail;
                     states.inc_ref(this.ptr);
                     break;
@@ -785,7 +784,7 @@ const StateMachine = class {
                     states.dec_ref(this.variable);
                     states.dec_ref(this.ptr);
                     states.dec_ref(rsv.right);
-                    this.variable = SymbolFn.Void;
+                    this.variable = StateFn.VOID;
                     this.ptr = this.trail;
                     states.inc_ref(this.ptr);
                     break;
@@ -794,11 +793,11 @@ const StateMachine = class {
                     if (!m.done) {
                         states.dec_ref(this.ptr);
                         this.current_char = new StateFn(StateType.Print, m.value);
-                        this.ptr = states.add_resolved(rsv.right, SymbolFn.Identity);
+                        this.ptr = states.add_resolved(rsv.right, StateFn.IDENTITY);
                         states.inc_ref(this.ptr);
                     } else if (input.eof) {
                         states.dec_ref(this.ptr);
-                        this.ptr = states.add_resolved(rsv.right, SymbolFn.Void);
+                        this.ptr = states.add_resolved(rsv.right, StateFn.VOID);
                         states.inc_ref(this.ptr);
                     } else {
                         states.dec_ref(rsv.right);
@@ -809,9 +808,9 @@ const StateMachine = class {
                     case StateType.Compare:
                     let compare_result;
                     if (!this.current_char || this.current_char.addr != rsv.left.addr) {
-                        compare_result = SymbolFn.Void;
+                        compare_result = StateFn.VOID;
                     } else {
-                        compare_result = SymbolFn.Identity;
+                        compare_result = StateFn.IDENTITY;
                     }
                     states.dec_ref(this.ptr);
                     this.ptr = states.add_resolved(rsv.right, compare_result);
@@ -844,7 +843,7 @@ const StateMachine = class {
                 this.ptr = call_left.left;
                 //console.log(''+this.ptr+' <'+call_left.left+' '+call_left.right+'> <- '+this.variable);
                 // adding a chain ensures we come back to <replacement> after we resolve call.left
-                let left_replacement= states.add_resolved(SymbolFn.Variable, call_left.right);
+                let left_replacement= states.add_resolved(StateFn.VARIABLE, call_left.right);
                 states.inc_ref(left_replacement);
                 this.trail = states.add_chain(left_replacement, this.trail);
                 states.inc_ref(this.trail);
@@ -870,7 +869,7 @@ const StateMachine = class {
                     states.inc_ref(this.trail);
                 } else {
                     states.dec_ref(this.ptr);
-                    let right_replacement = states.add_resolved(call_rl, SymbolFn.Variable);
+                    let right_replacement = states.add_resolved(call_rl, StateFn.VARIABLE);
                     this.ptr = call_right.right;
                     states.inc_ref(right_replacement);
                     this.trail = states.add_chain(right_replacement, this.trail);
@@ -883,7 +882,7 @@ const StateMachine = class {
                 states.inc_ref(call_both.right);
                 states.dec_ref(this.ptr);
                 //console.log(''+this.ptr+' <'+call_both.left+' '+call_both.right+'> <- '+this.variable);
-                let replacement = states.add_call_right(SymbolFn.Variable, call_both.right);
+                let replacement = states.add_call_right(StateFn.VARIABLE, call_both.right);
                 this.ptr = call_both.left;
                 states.inc_ref(replacement);
                 this.trail = states.add_chain(replacement, this.trail);
