@@ -23,11 +23,6 @@ export const Unlambda = class {
         // in order to construct our tree in a single pass,
         // we keep track of which part of the tree we're building.
         //
-        // last_fn_ptr keeps track of the last branch/node.
-        // when two branches have been paired, the resulting node
-        // that points to both is stored in last_fn_ptr, and we
-        // no longer have to keep track of the pair itself.
-        //
         // lefts keeps a list of the un-paired branches.
         //
         // left_completed keeps a list of branch progression,
@@ -35,7 +30,6 @@ export const Unlambda = class {
         // binary tree of function applications.  this way,
         // we know when to add a left branch vs when to pair
         // an existing left branch with a new right branch.
-        let last_fn_ptr = void 8;
         let lefts = [];
         let left_completed = [];
         // char_fn contains the function type information for
@@ -61,7 +55,6 @@ export const Unlambda = class {
         // of optimizing Unlambda exection..
         for (let index = 0; index < source.length; index++) {
             let character = source[index];
-            // current_fn holds the current node, if it exists.
             let current_fn = void 8;
             switch (state) {
 		case READ:
@@ -76,6 +69,7 @@ export const Unlambda = class {
                     // defer adding it until we get both arguments,
                     // by incrementing our position on the tree.
                     left_completed.push(false);
+                    continue;
                     // we were at the base of the tree, but a program
                     // has already been completed!
                     if (left_completed.length == 1 && lefts.length > 0) {
@@ -97,18 +91,22 @@ export const Unlambda = class {
                     char_fn = StateType.Print;
                     current_cache = print_cache;
                     state = CHAR;
-                    break;
+                    continue;
                     case '?':
                     char_fn = StateType.Compare;
                     current_cache = compare_cache;
                     state = CHAR;
-                    break;
+                    continue;
                     // start of a comment:
-                    case '#': state = CMMT; break;
+                    case '#':
+                    state = CMMT;
+                    continue;
                     default:
                     // if its whitespace, just skip ahead,
                     // but if its otherwise unrecognized, its an error.
-                    if (current_fn == null && !character.match(/\s/)) {
+                    if (character.match(/\s/)) {
+                        continue;
+                    } else {
                         throw ParseError.Unrecognized(source, index, character);
                     }
                 }
@@ -127,63 +125,49 @@ export const Unlambda = class {
                 case CMMT:
                 // discard until newline
                 if (character == "\n") state = READ;
-                break;
+                continue;
             }
-            if (current_fn != null) {
-                if (left_completed.length == 0) {
-                    // we're at the base of the tree, but still have more
-                    // non-trivial input. there are two possibilities:
-                    if (lefts.length > 0) {
-                        throw ParseError.LateInput(source, index,
-                            current_fn.type.long_description, character);
-                    }
-                    // program is just a single function, apparently
-                    let last_rhs = states.add_resolved(StateFn.IDENTITY, current_fn);
-                    lefts.push(last_rhs);
-                    last_fn_ptr = last_rhs;
-                } else if (left_completed[left_completed.length-1]) {
-                    // we already have a left-hand side, so...
-                    // complete function application using left and right! :)
-                    // then we also need to clean up those function applications
-                    // that were waiting on a right-hand side.
-                    let last_rhs = current_fn;
-                    while (left_completed[left_completed.length-1]) {
-                        left_completed.pop();
-                        let x = lefts.pop(); let y = last_rhs;
-                        let subcache = application_cache.get(x);
-                        if (!subcache) {
-                            subcache = new Map ();
-                            application_cache.set(x, subcache);
-                        }
-                        last_rhs = subcache.get(y);
-                        if (!last_rhs) {
-                            states.inc_ref(x);
-                            states.inc_ref(y);
-                            last_rhs = states.add_application(x, y)
-                            subcache.set(y, last_rhs);
-                        }
-                    }
-                    lefts.push(last_rhs);
-                    left_completed[left_completed.length-1] = true;
-                    last_fn_ptr = last_rhs;
-                } else {
-                    // we don't have a left-hand side yet, so we need
-                    // to set this as some left-hand side, and defer until
-                    // we get the right-hand side.
-                    lefts.push(current_fn);
-                    left_completed[left_completed.length-1] = true;
+            // if the loop hasn't been <continue>ed then we got a function.
+            // check if we're at the base of the tree, but still found a function:
+            if (left_completed.length == 0) {
+                if (lefts.length > 0) {
+                    throw ParseError.LateInput(source, index,
+                        current_fn.type.long_description, character);
+                }
+                // program is just a single function, apparently
+                current_fn = states.add_resolved(StateFn.IDENTITY, current_fn);
+            }
+            // loop as long as we already have an unpaired left-hand side in the tree,
+            // and complete function application using left and right! :)
+            while (left_completed[left_completed.length-1]) {
+                left_completed.pop();
+                let x = lefts.pop(); let y = current_fn;
+                let subcache = application_cache.get(x);
+                if (!subcache) {
+                    subcache = new Map ();
+                    application_cache.set(x, subcache);
+                }
+                current_fn = subcache.get(y);
+                if (!current_fn) {
+                    states.inc_ref(x);
+                    states.inc_ref(y);
+                    current_fn = states.add_application(x, y)
+                    subcache.set(y, current_fn);
                 }
             }
+            // finally, store whatever our function result is
+            lefts.push(current_fn);
+            left_completed[left_completed.length-1] = true;
         }
         if (left_completed.length > 0) {
             // we never reached the base of the tree
             throw ParseError.EndsEarly(source, source.length);
         }
         // i should probably explain the reference counting..
-        states.inc_ref(last_fn_ptr);
+        states.inc_ref(lefts[0]);
         // anyway states are done, so we can make a StateMachine with them, and
         // use the base call as the entry state.
-        let state_machine = new StateMachine (states, last_fn_ptr);
+        let state_machine = new StateMachine (states, lefts[0]);
         return state_machine;
     }
 }
