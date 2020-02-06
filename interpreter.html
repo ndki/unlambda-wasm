@@ -54,7 +54,7 @@ run_button.addEventListener('click', (e) => {
     } catch (e) {
         parse_place.innerText = 'Parse failed.';
         error_place.innerText = ''+e;
-        console.error(e);
+        console.error(''+e);
     }
     if (ast) {
         let stop_exec = (e) => { ast.exit = true };

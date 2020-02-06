@@ -59,124 +59,125 @@ export const Unlambda = class {
         // un-rolls itself to execute. so being conservative with
         // function creation (and deletion) is actually the main pragma
         // of optimizing Unlambda exection..
-        for (let c of source) {
+        for (let index = 0; index < source.length; index++) {
+            let character = source[index];
             // current_fn holds the current node, if it exists.
             let current_fn = void 8;
             switch (state) {
                 case CMMT:
                 // discard until newline
-                if (c == "\n") state = READ;
+                if (character == "\n") state = READ;
                 break;
                 case CHAR:
-                // complete char_fn as current_fn
+                // complete char_fn as current_fn with current char
                 // (possibly cached -- the current_cache is already
                 // modified to be the correct one to search)
-                current_fn = current_cache.get(c);
+                current_fn = current_cache.get(character);
                 if (!current_fn) {
-                    current_fn = new StateFn(char_fn, c);
-                    current_cache.set(c, current_fn);
+                    current_fn = new StateFn(char_fn, character);
+                    current_cache.set(character, current_fn);
                 }
                 state = READ;
-                // continue to READ execution
-                case READ:
-                // if we're not coming from CHAR, then we need to
+                break;
+                default:
+                // if we're not in CHAR or CMMT, then we need to
                 // figure out what the current character does.
                 // if it's a function, we assign to current_fn.
                 // if its an incomplete function, the beginning
                 // of a comment, or a function application,
                 // we change state appropriately and just move on.
-                if (!current_fn) {
-                    switch (c) {
-                        case '`':
-                        // this is a function application, so we
-                        // defer adding it until we get both arguments,
-                        // by incrementing our position on the tree.
-                        // TODO handle the case of input after end of program.
-                        left_completed.push(false);
-                        break;
-                        // character functions transition to CHAR:
-                        case '.':
-                        char_fn = StateType.Print;
-                        current_cache = print_cache;
-                        state = CHAR;
-                        break;
-                        case '?':
-                        char_fn = StateType.Compare;
-                        current_cache = compare_cache;
-                        state = CHAR;
-                        break;
-                        // start of a comment:
-                        case '#': state = CMMT; break;
-                        // normal fn:
-                        case 'i': current_fn = StateFn.IDENTITY; break;
-                        case 'v': current_fn = StateFn.VOID; break;
-                        case 'd': current_fn = StateFn.DELAY; break;
-                        case 'k': current_fn = StateFn.CONSTANT; break;
-                        case 's': current_fn = StateFn.SUBSTITUTE; break;
-                        case 'c': current_fn = StateFn.CALLCC; break;
-                        case 'r': current_fn = StateFn.NEWLINE; break;
-                        case '@': current_fn = StateFn.READ; break;
-                        case '|': current_fn = StateFn.REPRINT; break;
-                        default:
-                        // if its whitespace, just skip ahead,
-                        // but if its otherwise unrecognized, its an error.
-                        if (current_fn == null && !c.match(/\s/)) {
-                            throw 'Parse error: Unrecognized character '+c+'.'
-                        }
-
+                switch (character) {
+                    case '`':
+                    // this is a function application, so we
+                    // defer adding it until we get both arguments,
+                    // by incrementing our position on the tree.
+                    left_completed.push(false);
+                    // we were at the base of the tree, but a program
+                    // has already been completed!
+                    if (left_completed.length == 1 && lefts.length > 0) {
+                        throw ParseError.LateInput(source, index, 'function application', character);
+                    }
+                    break;
+                    // normal fn:
+                    case 's': current_fn = StateFn.SUBSTITUTE; break;
+                    case 'k': current_fn = StateFn.CONSTANT; break;
+                    case 'i': current_fn = StateFn.IDENTITY; break;
+                    case 'v': current_fn = StateFn.VOID; break;
+                    case 'c': current_fn = StateFn.CALLCC; break;
+                    case 'd': current_fn = StateFn.DELAY; break;
+                    case '@': current_fn = StateFn.READ; break;
+                    case '|': current_fn = StateFn.REPRINT; break;
+                    case 'r': current_fn = StateFn.NEWLINE; break;
+                    // character functions transition to CHAR:
+                    case '.':
+                    char_fn = StateType.Print;
+                    current_cache = print_cache;
+                    state = CHAR;
+                    break;
+                    case '?':
+                    char_fn = StateType.Compare;
+                    current_cache = compare_cache;
+                    state = CHAR;
+                    break;
+                    // start of a comment:
+                    case '#': state = CMMT; break;
+                    default:
+                    // if its whitespace, just skip ahead,
+                    // but if its otherwise unrecognized, its an error.
+                    if (current_fn == null && !character.match(/\s/)) {
+                        throw ParseError.Unrecognized(source, index, character);
                     }
                 }
-                if (current_fn != null) {
-                    if (left_completed.length == 0) {
-                        // we're at the base of the tree, but still have more
-                        // non-trivial input. there are two possibilities:
-                        if (lefts.length > 0) {
-                            throw 'Parse error: Unexpected character "'+c+'" after end of program.'+"\n"
-                                + 'Are you missing a function application at the beginning?';
-                        } else {
-                            // program is just a single function, apparently
-                            let last_rhs = states.add_resolved(StateFn.IDENTITY, current_fn);
-                            lefts.push(last_rhs);
-                            last_fn_ptr = last_rhs;
-                        }
-                    } else if (left_completed[left_completed.length-1]) {
-                        // we already have a left-hand side, so...
-                        // complete function application using left and right! :)
-                        // then we also need to clean up those function applications
-                        // that were waiting on a right-hand side.
-                        let last_rhs = current_fn;
-                        while (left_completed[left_completed.length-1]) {
-                            left_completed.pop();
-                            let x = lefts.pop(); let y = last_rhs;
-                            let subcache = application_cache.get(x);
-                            if (!subcache) {
-                                subcache = new Map ();
-                                application_cache.set(x, subcache);
-                            }
-                            last_rhs = subcache.get(y);
-                            if (!last_rhs) {
-                                states.inc_ref(x);
-                                states.inc_ref(y);
-                                last_rhs = states.add_application(x, y)
-                                subcache.set(y, last_rhs);
-                            }
-                        }
-                        lefts.push(last_rhs);
-                        left_completed[left_completed.length-1] = true;
-                        last_fn_ptr = last_rhs;
-                    } else {
-                        // we don't have a left-hand side yet, so we need
-                        // to set this as some left-hand side, and defer until
-                        // we get the right-hand side.
-                        lefts.push(current_fn);
-                        left_completed[left_completed.length-1] = true;
+            }
+            if (current_fn != null) {
+                if (left_completed.length == 0) {
+                    // we're at the base of the tree, but still have more
+                    // non-trivial input. there are two possibilities:
+                    if (lefts.length > 0) {
+                        throw ParseError.LateInput(source, index,
+                            current_fn.type.long_description, character);
                     }
+                    // program is just a single function, apparently
+                    let last_rhs = states.add_resolved(StateFn.IDENTITY, current_fn);
+                    lefts.push(last_rhs);
+                    last_fn_ptr = last_rhs;
+                } else if (left_completed[left_completed.length-1]) {
+                    // we already have a left-hand side, so...
+                    // complete function application using left and right! :)
+                    // then we also need to clean up those function applications
+                    // that were waiting on a right-hand side.
+                    let last_rhs = current_fn;
+                    while (left_completed[left_completed.length-1]) {
+                        left_completed.pop();
+                        let x = lefts.pop(); let y = last_rhs;
+                        let subcache = application_cache.get(x);
+                        if (!subcache) {
+                            subcache = new Map ();
+                            application_cache.set(x, subcache);
+                        }
+                        last_rhs = subcache.get(y);
+                        if (!last_rhs) {
+                            states.inc_ref(x);
+                            states.inc_ref(y);
+                            last_rhs = states.add_application(x, y)
+                            subcache.set(y, last_rhs);
+                        }
+                    }
+                    lefts.push(last_rhs);
+                    left_completed[left_completed.length-1] = true;
+                    last_fn_ptr = last_rhs;
+                } else {
+                    // we don't have a left-hand side yet, so we need
+                    // to set this as some left-hand side, and defer until
+                    // we get the right-hand side.
+                    lefts.push(current_fn);
+                    left_completed[left_completed.length-1] = true;
                 }
             }
         }
         if (left_completed.length > 0) {
             // we never reached the base of the tree
-            throw "Parse error: Source ends before function application is completed."
+            throw ParseError.EndsEarly(source, source.length);
         }
         // i should probably explain the reference counting..
         states.inc_ref(last_fn_ptr);
@@ -186,6 +187,41 @@ export const Unlambda = class {
         return state_machine;
     }
 }
+
+// more detailed errors are certainly possible,
+// but it seems superfluous in this particular case...
+const ParseError = class {
+    message;
+    constructor (source, index, message, hint) {
+        this.message = message;
+        this.hint = hint;
+        let context_len = 15;
+        this.source_hint_1 = source.slice(Math.max(index - context_len, 0),index);
+        this.source_hint_2 = source.slice(index, index + context_len + 1);
+    }
+    toString () {
+        return "Unlambda ParseError: " +
+            this.message + '\n' +
+            'Error occurs here: \uFF62' +
+                this.source_hint_1 + '<ERROR>' + this.source_hint_2 + '\uFF63\n' +
+            this.hint+'\n';
+    }
+}
+Unlambda.ParseError = ParseError;
+
+add_enum(ParseError, {
+    EndsEarly: (source, index) => new ParseError
+        (source, index, 'Unexpected end of program:\n' +
+            'Some function application is still incomplete.',
+            'The program may be truncated, or may have too many \uFF62`\uFF63s.'),
+    Unrecognized: (source, index, token) => new ParseError
+        (source, index, 'Unrecognized token: \uFF62'+token+'\uFF63.',
+            'Are you missing a \uFF62.\uFF63, \uFF62?\uFF63 or \uFF62#\uFF63?'),
+    LateInput: (source, index, token_type, token) => new ParseError
+        (source, index, 'Input after expected end of program:\n' +
+            'Got '+token_type+' token \uFF62'+token+'\uFF63 instead of EOF.',
+            'Are you missing a function application at the beginning?'),
+})
 
 // we compile to a state machine...  we very frequently add states.
 //
@@ -223,7 +259,11 @@ export const Unlambda = class {
 // while the enum map only exists on the class object.
 const StateType = class {
     description;
-    constructor (description) { this.description = description }
+    long_description
+    constructor (description, long_description) {
+        this.description = description;
+        this.long_description = long_description;
+    }
     eval_needed () {
         return this == StateType.CallLeft
             || this == StateType.CallRight
@@ -234,34 +274,33 @@ const StateType = class {
 // can also just do StateType.X = Y, but this is a little nicer
 add_enum(StateType, {
     // eval-needing functions:
-    CallLeft: new StateType('U'), // LHS needs eval
-    CallRight: new StateType('V'), // RHS needs eval
-    CallBoth: new StateType('W'), // both sides need eval
-    Resolved: new StateType('R'), // neither side needs eval
+    CallLeft: new StateType('U', 'call-left'), // LHS needs eval
+    CallRight: new StateType('V', 'call-right'), // RHS needs eval
+    CallBoth: new StateType('W', 'call-both'), // both sides need eval
+    Resolved: new StateType('R', 'resolved'), // neither side needs eval
     // stand-in for anything below it:
-    Variable: new StateType('X'),
+    Variable: new StateType('X', 'variable'),
     // execution-changing function:
-    Continuation: new StateType('&'),
+    Continuation: new StateType('&', 'continuation'),
     // curried functions:
-    Identity1: new StateType('I'), // going away please
-    Constant1: new StateType('K'),
-    Substitute1: new StateType('S'),
-    Substitute2: new StateType('Z'),
-    Promise: new StateType('D'),
+    Identity1: new StateType('I', 'idX'), // going away please
+    Constant1: new StateType('K', 'constant'),
+    Substitute1: new StateType('S', 'partial substitution combinator'),
+    Substitute2: new StateType('Z', 'substitution'),
+    Promise: new StateType('D', 'promise'),
     // simple functions:
-    Exit: new StateType('e'),
-    Void: new StateType('v'),
-    Identity: new StateType('i'),
-    Delay: new StateType('d'),
-    Constant: new StateType('k'),
-    Substitute: new StateType('s'),
-    CallCC: new StateType('c'),
-    Read: new StateType('@'),
-    Reprint: new StateType('|'),
-    Pointer: new StateType('P'),
+    Exit: new StateType('e', 'exit'),
+    Void: new StateType('v', 'void'),
+    Identity: new StateType('i', 'identity'),
+    Delay: new StateType('d', 'delay'),
+    Constant: new StateType('k', 'constant combinator'),
+    Substitute: new StateType('s', 'substitution combinator'),
+    CallCC: new StateType('c', 'call/cc'),
+    Read: new StateType('@', 'read'),
+    Reprint: new StateType('|', 'reprint'),
     // char functions:
-    Print: new StateType('.'),
-    Compare: new StateType('?'),
+    Print: new StateType('.', 'print'),
+    Compare: new StateType('?', 'compare'),
 });
 
 const StateFn = class {
